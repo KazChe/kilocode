@@ -1,6 +1,7 @@
 import path from "path"
 import os from "os"
 import fs from "fs/promises"
+import { context, propagation } from "@opentelemetry/api" // kilocode_change - OTel turn baggage
 import { KiloSessionPrompt } from "@/kilocode/session/prompt" // kilocode_change
 import { KiloSessionPromptQueue } from "@/kilocode/session/prompt-queue" // kilocode_change
 import { KiloSession } from "@/kilocode/session" // kilocode_change
@@ -1968,7 +1969,52 @@ const quoteTrimRegex = /^["']|["']$/g
 
 // kilocode_change start - legacy promise helpers for Kilo callsites
 const { runPromise } = makeRuntime(Service, defaultLayer)
-export const prompt = (input: PromptInput) => runPromise((svc) => svc.prompt(input))
+
+// kilocode_change start - OTel GenAI turn baggage
+//
+// Turn-level grouping attributes (per OTEL_INSTRUMENTATION_PLAN.md and
+// open-telemetry/semantic-conventions#3661) are set at the external
+// runPromise boundary rather than inside the SessionPrompt.prompt
+// Effect.fn body. This avoids the R = never limitation of the withBaggage
+// helper (see commit 6 message and the Decisions table in the plan).
+//
+// AsyncLocalStorageContextManager (registered globally in
+// src/effect/observability.ts) carries the OTel context across the
+// runPromise boundary, so spans emitted anywhere downstream see these
+// attributes via the BaggageSpanProcessor wired in commit 4 (filtered
+// to gen_ai.* in kilo-telemetry/src/tracer.ts).
+//
+// Mapping from Kilo agent name to the proposal's iteration.type taxonomy.
+// Default to "react" for unknown / user-defined agents (the most common
+// agentic pattern). See OTEL_INSTRUMENTATION_PLAN.md attribute table.
+const ITERATION_TYPE_BY_AGENT: Record<string, string> = {
+  code: "code_react",
+  plan: "plan_execute",
+  explore: "tool_use",
+  debug: "debug_react",
+  orchestrator: "orchestrate",
+  ask: "ask",
+}
+
+export function mapAgentToIterationType(agent: string): string {
+  return ITERATION_TYPE_BY_AGENT[agent] ?? "react"
+}
+
+export function buildTurnBaggage(input: PromptInput) {
+  let bag = propagation.createBaggage().setEntry("gen_ai.conversation.id", { value: input.sessionID })
+  if (input.agent) {
+    bag = bag.setEntry("gen_ai.agent.id", { value: input.agent })
+    bag = bag.setEntry("gen_ai.group.iteration.type", { value: mapAgentToIterationType(input.agent) })
+  }
+  return bag
+}
+// kilocode_change end - OTel GenAI turn baggage
+
+export const prompt = (input: PromptInput) => {
+  // kilocode_change - wrap runPromise with OTel turn baggage
+  const ctx = propagation.setBaggage(context.active(), buildTurnBaggage(input))
+  return context.with(ctx, () => runPromise((svc) => svc.prompt(input)))
+}
 export const loop = (input: z.infer<typeof LoopInput>) => runPromise((svc) => svc.loop(input))
 export const cancel = (sessionID: SessionID) => runPromise((svc) => svc.cancel(sessionID))
 // kilocode_change end

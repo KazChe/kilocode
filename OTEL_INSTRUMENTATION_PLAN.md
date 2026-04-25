@@ -24,6 +24,78 @@ that the Python prototype repo does not cover.
 3. Stay vendor-neutral: emit standard OTel via OTLP so any backend (Phoenix,
    Arize, Galileo, Jaeger, Tempo) can ingest, filter, and group.
 
+## Instrumentation roles and proposal alignment
+
+The OTel GenAI proposals
+([#3661](https://github.com/open-telemetry/semantic-conventions/issues/3661)
+grouping,
+[#3662](https://github.com/open-telemetry/semantic-conventions/issues/3662)
+causality) are addressed to **instrumentation authors**. In Kilo's runtime
+three instrumentation surfaces meet, and only one of them is in our control:
+
+| Surface | Instrumentation author | Implements the proposal? |
+|---|---|---|
+| AI SDK spans (`ai.streamText`, `ai.streamText.doStream`, `ai.toolCall`) | Vercel | No (not aware of the proposals) |
+| Effect.fn spans (`SessionPrompt.run`, etc.) | Effect / `@effect/opentelemetry` | No (not aware) |
+| Kilo's tool framework (the `execute_tool` span we add in commit 10) | **Us, this prototype** | Yes |
+
+### Dual role we play
+
+The proposal's "ideal" causality flow expects **the LLM library's
+instrumentation author to capture trace context at tool-call emission** and
+pass it downstream (via a native sidecar where one exists, or out-of-band
+keyed by `tool_call_id` where one doesn't). Vercel AI SDK does not do this
+today. The upstream cooperation the proposal assumes is missing.
+
+In Kilo we play **both roles**:
+
+1. **Stand in for Vercel AI SDK** by capturing trace context at the consumer
+   site ([`session/processor.ts` `case "tool-call":`](packages/opencode/src/session/processor.ts#L298)).
+   This is the closest point we can reach to where Vercel's instrumentor
+   would capture if it were aware of the proposal.
+2. **Author Kilo's tool framework instrumentation** by extracting the carrier
+   at [`tool/tool.ts`](packages/opencode/src/tool/tool.ts) and emitting the
+   `execute_tool` span with the captured context as parent.
+
+### Mapping to the proposal's named patterns
+
+#3662 explicitly handles frameworks without a native sidecar (the Python
+prototype's AutoGen, LlamaIndex, CrewAI). The proposal calls this
+**out-of-band correlation**: maintain a `tool_call_id`-keyed map populated
+by whoever observes the tool call and consumed by whoever executes it.
+
+> "Out-of-Band Correlation is the fallback for frameworks that don't provide
+> a native sidecar. It means the carrier doesn't travel inside any framework
+> object at all. Instead, the instrumentor stores the carrier in a separate
+> data structure, typically a thread-local or async-local dict that is keyed
+> by the tool call's correlation ID." — #3662
+
+For Kilo, `processor.ts` plays the exact role of "the instrumentor" in that
+passage: it observes the tool-call event and places the carrier in the
+`CausalityCarrier` map (commit 6) keyed by `tool_call.id`. This is the same
+pattern the Python prototype uses for AutoGen, LlamaIndex, and CrewAI.
+
+### Proposal conformance scorecard
+
+- ✅ `tool_call_id` as the correlation key
+- ✅ Out-of-band `Map<toolCallId, Context>` carrier — matches the proposal's
+  named fallback for frameworks without a native sidecar
+- ⚠️ The captured context is the consumer's Effect.fn frame, not Vercel's
+  `ai.streamText.doStream` — this is a feature of Kilo's setup (Vercel AI
+  SDK is opaque to us). The Python prototype's tests for AutoGen,
+  LlamaIndex, and CrewAI all capture similar consumer-side contexts for the
+  same reason: when the upstream LLM library doesn't cooperate, the
+  instrumentor's natural point of observation is the consumer.
+- ✅ Extract at the tool framework boundary (`tool/tool.ts`)
+- ✅ Parent-child causal tree in the rendered trace
+
+The prototype demonstrates the pattern is implementable end-to-end. In a
+fully conformant world Vercel AI SDK would do the capture; `processor.ts`
+would not need to. **The pattern works either way; the capture site is
+implementation detail.** This is a meaningful complement to the Python
+prototype, because it adds a TypeScript / single-process / IDE-extension /
+non-Python-agent-framework data point to the same proposal pattern.
+
 ## Non-goals (v0)
 
 - Skill detection. Kilo's skills are markdown content the model reads, not
@@ -465,7 +537,7 @@ commit 7.
 | 6 | `feat(telemetry): add CausalityCarrier module + withBaggage helper` | New `packages/kilo-telemetry/src/causality-carrier.ts` (pure OTel) and new `packages/opencode/src/effect/otel-baggage.ts` (Effect-aware helper with `<A, E>` signature; R = never). | ✅ done | No (not wired yet) |
 | 7 | (this commit) `feat(session): set turn-level baggage in SessionPrompt.prompt` | Wraps the external `prompt(input)` boundary at [`session/prompt.ts:1971`](packages/opencode/src/session/prompt.ts#L1971) with `context.with(setBaggage(...), () => runPromise(...))`. Adds inline `mapAgentToIterationType` and `buildTurnBaggage` helpers. Emits `gen_ai.conversation.id` always, plus `gen_ai.agent.id` and `gen_ai.group.iteration.type` when `input.agent` is provided. Avoids the R-limitation by setting baggage outside Effect; AsyncLocalStorage carries it through. Unit tests for the helpers. `loop` and `cancel` exports are not wrapped (out of scope for v0). | ⏳ this commit | Yes (turn attributes appear on every span in the trace tree when `experimental.otlp_export.enabled=true`) |
 | 8 | `feat(session): set step-level baggage in runLoop` | session/prompt.ts while body; emits `gen_ai.group.id = "<sessionID>:step-<N>"` | pending | Yes |
-| 9 | `feat(session): capture LLM/tool-call carrier in processor` | session/processor.ts case "tool-call" | pending | No (capture-only, not extracted yet) |
+| 9 | `feat(session): capture LLM/tool-call carrier in processor` | [`session/processor.ts` `case "tool-call":`](packages/opencode/src/session/processor.ts#L298). One-line `CausalityCarrier.capture(value.toolCallId, context.active())` plus imports. See "Instrumentation roles and proposal alignment" above for why this site (consumer) plays the role of "the instrumentor" from the #3662 out-of-band correlation pattern, analogous to how the Python prototype handles AutoGen, LlamaIndex, and CrewAI. | pending | No (capture-only, not extracted yet) |
 | 10 | `feat(tool): emit execute_tool span with causal parent` | tool/tool.ts wrap | pending | Yes — capstone; causality tree appears in OTLP traces |
 | 11 | `feat(telemetry): thread recordContent flag to Vercel AI SDK` | session/llm.ts, kilo-telemetry config | pending | Yes (when otlpExport.recordContent=true) |
 | 12 | `docs(telemetry): OTLP configuration recipe` | README in kilo-telemetry or top-level | pending | No |

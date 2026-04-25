@@ -22,6 +22,8 @@ import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { errorMessage } from "@/util/error"
 import { Log } from "@/util"
 import { isRecord } from "@/util/record"
+import { context } from "@opentelemetry/api" // kilocode_change - causality carrier capture
+import { CausalityCarrier } from "@kilocode/kilo-telemetry" // kilocode_change - causality carrier capture
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -296,6 +298,22 @@ export const layer: Layer.Layer<
             return
 
           case "tool-call": {
+            // kilocode_change start - capture OTel context for causality (#3662)
+            //
+            // Stores the active OTel context keyed by the LLM-assigned tool call
+            // ID. tool/tool.ts (commit 10) extracts this in Tool.wrap and uses
+            // it as parent context for the execute_tool span, recovering the
+            // causal parent-child relationship between LLM decision and tool
+            // execution that is otherwise flat siblings under ai.streamText.
+            //
+            // This consumer-site capture is the "out-of-band correlation"
+            // pattern from #3662 (the named fallback for frameworks without a
+            // native sidecar). See "Instrumentation roles and proposal
+            // alignment" in OTEL_INSTRUMENTATION_PLAN.md for why processor.ts
+            // is the appropriate point of capture given that Vercel AI SDK does
+            // not implement the proposal upstream.
+            CausalityCarrier.capture(value.toolCallId, context.active())
+            // kilocode_change end
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }

@@ -23,6 +23,7 @@ import { beforeAll, describe, expect, test } from "bun:test"
 import { context, propagation, trace } from "@opentelemetry/api"
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks"
 import { Effect } from "effect"
+import { withBaggage } from "../../src/effect/otel-baggage"
 
 beforeAll(() => {
   const mgr = new AsyncLocalStorageContextManager()
@@ -137,34 +138,11 @@ describe("OTel baggage survives Effect.gen yields", () => {
 })
 
 describe("OTel baggage set INSIDE an Effect propagates to nested Effects (Q1b)", () => {
-  // Production-shaped test. SessionPrompt.prompt is itself an Effect.fn. We need to set
+  // Production-shaped tests. SessionPrompt.prompt is itself an Effect.fn. We need to set
   // baggage at its entry, then have that baggage visible inside deeper Effect.fn calls
-  // (the agent loop, tool execution, etc.). The bracketing pattern below is what we'd
-  // use in production. If this test passes, the plan's baggage strategy is viable.
-
-  function withBaggage<A, E>(values: Record<string, string>, eff: Effect.Effect<A, E>): Effect.Effect<A, E> {
-    return Effect.callback<A, E>((resume) => {
-      const previousContext = context.active()
-      const existing = propagation.getBaggage(previousContext) ?? propagation.createBaggage()
-      let merged = existing
-      for (const [key, value] of Object.entries(values)) {
-        merged = merged.setEntry(key, { value })
-      }
-      const newContext = propagation.setBaggage(previousContext, merged)
-      context.with(newContext, () => {
-        Effect.runPromise(eff).then(
-          (v) => {
-            // Restore outer context before resuming so the surrounding Effect
-            // sees its own baggage, not the inner scope's overrides.
-            context.with(previousContext, () => resume(Effect.succeed(v)))
-          },
-          (e) => {
-            context.with(previousContext, () => resume(Effect.die(e)))
-          },
-        )
-      })
-    })
-  }
+  // (the agent loop, tool execution, etc.). The withBaggage helper used here is the
+  // production module imported from src/effect/otel-baggage.ts; these tests validate
+  // the actual helper that production code uses.
 
   test("baggage set inside outer Effect.fn is visible in nested Effect.fn", async () => {
     let observed: string | undefined

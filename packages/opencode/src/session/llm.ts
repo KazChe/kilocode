@@ -32,6 +32,35 @@ import { InstallationVersion } from "@/installation/version"
 import { EffectBridge } from "@/effect"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
+import { context, propagation } from "@opentelemetry/api" // kilocode_change - turn baggage at streamText boundary
+
+// kilocode_change start - turn iteration.type mapping (mirrors session/prompt.ts; inlined to avoid a circular import)
+const ITERATION_TYPE_BY_AGENT: Record<string, string> = {
+  code: "code_react",
+  plan: "plan_execute",
+  explore: "tool_use",
+  debug: "debug_react",
+  orchestrator: "orchestrate",
+  ask: "ask",
+}
+function mapAgentToIterationType(agent: string): string {
+  return ITERATION_TYPE_BY_AGENT[agent] ?? "react"
+}
+
+// Per-session monotonic step counter for gen_ai.group.id (#3661 step-level
+// grouping). Each call to LLM.run for a given sessionID gets a fresh step
+// number; all spans created during that LLM round (ai.streamText,
+// ai.streamText.doStream, ai.toolCall, our execute_tool) inherit the same
+// gen_ai.group.id via baggage propagation. The map leaks per sessionID over
+// the process lifetime — acceptable for v0 (see OTEL_INSTRUMENTATION_PLAN.md
+// Q2: tool-call ID leak is bounded; same logic applies here).
+const STEP_COUNTERS = new Map<string, number>()
+function nextStep(sessionID: string): number {
+  const next = (STEP_COUNTERS.get(sessionID) ?? 0) + 1
+  STEP_COUNTERS.set(sessionID, next)
+  return next
+}
+// kilocode_change end
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -354,7 +383,41 @@ const live: Layer.Layer<
           })
         : undefined
 
-      return streamText({
+      // kilocode_change start - set turn-level baggage at streamText boundary
+      //
+      // The wrapped prompt() export at session/prompt.ts:1971 only fires for
+      // direct programmatic Session.prompt(input) callers. All real Kilo
+      // entry points (VS Code extension via kilo serve daemon, kilo run CLI
+      // via SDK, TUI via SDK) go through SDK -> server -> svc.prompt(...)
+      // which bypasses that wrapper. Setting baggage here at the streamText
+      // call site catches every code path.
+      //
+      // AsyncLocalStorage (registered in src/effect/observability.ts) carries
+      // the OTel context through streamText's synchronous span creation and
+      // its scheduled microtasks for the LLM HTTP request and event delivery.
+      // BaggageSpanProcessor (commit 4) on kilo-telemetry's NodeTracerProvider
+      // copies gen_ai.* baggage entries onto every span created via
+      // Telemetry.getTracer() (the tracer passed to experimental_telemetry
+      // below), so AI SDK spans and our future execute_tool span all carry
+      // these attributes.
+      const turnBaggage = (() => {
+        const stepId = `${input.sessionID}:step-${nextStep(input.sessionID)}`
+        let bag = propagation
+          .createBaggage()
+          .setEntry("gen_ai.conversation.id", { value: input.sessionID })
+          .setEntry("gen_ai.group.id", { value: stepId })
+        if (input.agent?.name) {
+          bag = bag.setEntry("gen_ai.agent.id", { value: input.agent.name })
+          bag = bag.setEntry("gen_ai.group.iteration.type", {
+            value: mapAgentToIterationType(input.agent.name),
+          })
+        }
+        return bag
+      })()
+      const turnContext = propagation.setBaggage(context.active(), turnBaggage)
+      // kilocode_change end
+
+      return context.with(turnContext, () => streamText({
         onError(error) {
           l.error("stream error", {
             error,
@@ -438,7 +501,7 @@ const live: Layer.Layer<
           tracer: Telemetry.getTracer() ?? undefined,
         },
         // kilocode_change end
-      })
+      }))
     })
 
     const stream: Interface["stream"] = (input) =>

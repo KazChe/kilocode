@@ -3,8 +3,15 @@ import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { resourceFromAttributes } from "@opentelemetry/resources"
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions"
 import type { Tracer } from "@opentelemetry/api"
+import { BaggageSpanProcessor } from "@opentelemetry/baggage-span-processor"
 import { PostHogSpanExporter } from "./otel-exporter.js"
 import { Client } from "./client.js"
+
+// Filter for baggage entries that get copied onto spans by BaggageSpanProcessor.
+// Limited to the gen_ai.* namespace so unrelated baggage (e.g. set by other
+// libraries or by upstream HTTP headers) does not leak onto our spans.
+// See OTel GenAI semconv proposal #3661 for the namespace.
+const BAGGAGE_KEY_FILTER = (key: string) => key.startsWith("gen_ai.")
 
 let provider: NodeTracerProvider | null = null
 let exporter: PostHogSpanExporter | null = null
@@ -40,7 +47,10 @@ export namespace TracerSetup {
         [ATTR_SERVICE_NAME]: options.appName,
         [ATTR_SERVICE_VERSION]: options.version,
       }),
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+      // BaggageSpanProcessor must precede the exporter processor so baggage
+      // entries (e.g. gen_ai.group.id) are copied onto span attributes before
+      // export. Filtered to the gen_ai.* namespace.
+      spanProcessors: [new BaggageSpanProcessor(BAGGAGE_KEY_FILTER), new SimpleSpanProcessor(exporter)],
     })
 
     // Register the provider globally so all tracers use our exporter

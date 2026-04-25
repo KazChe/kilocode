@@ -47,6 +47,10 @@ that the Python prototype repo does not cover.
 | Span links | Not used | Per #3662 stated stance. |
 | Vercel AI SDK tool spans | Layer our `execute_tool` span on top, accept duplication | Reversible; revisit after v0. |
 | OTLP export | Opt-in via config flag | Default off; existing PostHog flow unchanged. |
+| OTLP config shape | `experimental.otlp_export.{enabled, endpoint, headers, record_content}` (snake_case) | Matches existing `experimental.*` snake_case convention. The pre-existing `openTelemetry` field is the only camelCase outlier. Internal TS function signatures use camelCase (`otlpExport`, `recordContent`) with explicit field mapping at the [`opencode/src/index.ts`](packages/opencode/src/index.ts) bridge. |
+| OTLP misconfiguration | `enabled=true` with missing `endpoint` → `console.warn` and skip OTLP setup | Graceful degradation. PostHog flow unaffected; no crash. |
+| OTLP processor | `BatchSpanProcessor` wrapping `OTLPTraceExporter` from `@opentelemetry/exporter-trace-otlp-http` | PostHog stays on `SimpleSpanProcessor` (small, sync flush). OTLP needs batching for network efficiency. Default batch params (queue 2048, delay 5s) are fine for v0. |
+| Span processor order | `[BaggageSpanProcessor, SimpleSpanProcessor (PostHog), BatchSpanProcessor (OTLP, when enabled)]` | BaggageSpanProcessor MUST be first so baggage is copied onto span attributes before any exporter sees the span. Both exporters then receive the same enriched spans. |
 | Carrier mechanism | In-memory `Map<toolCallId, SpanContext>` | Single-process, no cross-framework serialization needed. |
 
 ## Architecture (validated)
@@ -405,12 +409,18 @@ backend, their own data). Options:
   (matches existing PostHog filter pattern)
 - (c) Two TracerProviders: one with content for OTLP, one without for PostHog
 
-**Decision:** option (a). Add a config flag `experimental.otlpExport.recordContent`
+**Decision:** option (a). Add a config flag `experimental.otlp_export.record_content`
 and thread it through to the Vercel AI SDK call. **Default ON** when OTLP
 export is enabled, so the user sees full content by default in their own
 backend. PostHog keeps its defense-in-depth filter at
 [otel-exporter.ts:12-32](packages/kilo-telemetry/src/otel-exporter.ts#L12-L32),
 so content present in spans is still stripped before send to PostHog.
+
+**Implementation split:** the schema field `record_content` lands in commit 5
+(the OTLP exporter commit) for schema completeness. The actual threading to
+the Vercel AI SDK's `experimental_telemetry.recordInputs/recordOutputs` lands
+in commit 11. Between those commits, OTLP receives spans but content is
+still stripped at the AI SDK boundary, same as PostHog gets today.
 
 ## Validation strategy
 
@@ -446,9 +456,10 @@ commit 7.
 |---|---|---|---|---|
 | 1 | `docs: add OTel instrumentation plan` | This file | ✅ done | No |
 | 2 | `test: validate OTel baggage propagation through Effect.gen and Effect.fn` | [packages/opencode/test/effect/otel-baggage-propagation.test.ts](packages/opencode/test/effect/otel-baggage-propagation.test.ts), 8/8 passing | ✅ done | No |
-| 3 | `docs: update plan with validation results + dual-provider architecture` | This file | ⏳ this commit | No |
-| 4 | `feat(telemetry): add BaggageSpanProcessor to kilo-telemetry` | [packages/kilo-telemetry/src/tracer.ts](packages/kilo-telemetry/src/tracer.ts) | pending | No (no baggage set yet) |
-| 5 | `feat(telemetry): add OTLP exporter to kilo-telemetry behind config flag` | kilo-telemetry adds OTLP as a second exporter alongside PostHog (Effect spans already export to OTLP via observability.ts; this adds AI SDK spans + future execute_tool spans to OTLP) | pending | No (default off) |
+| 3 | `docs: update plan with validation results + dual-provider architecture` | This file | ✅ done | No |
+| 4 | `feat(telemetry): add BaggageSpanProcessor to kilo-telemetry` | [packages/kilo-telemetry/src/tracer.ts](packages/kilo-telemetry/src/tracer.ts), filtered to `gen_ai.*` | ✅ done | No (no baggage set yet) |
+| 5 | `feat(telemetry): add OTLP exporter to kilo-telemetry behind config flag` | kilo-telemetry adds OTLP as a second exporter alongside PostHog. Decisions made during this commit are captured in the Decisions table above (snake_case config shape, half-config tolerance, processor ordering). `record_content` lands in the schema but is not yet threaded to the Vercel AI SDK; that's commit 11. | ✅ done | No (default off) |
+| 5a | (this commit) `docs: capture OTLP config decisions and progress` | This file | ⏳ this commit | No |
 | 6 | `feat(telemetry): add CausalityCarrier module + withBaggage helper` | New `packages/kilo-telemetry/src/causality-carrier.ts` and `packages/kilo-telemetry/src/baggage.ts` (the validated `withBaggage` helper) + tests | pending | No (not wired yet) |
 | 7 | `feat(session): set turn-level baggage in SessionPrompt.prompt` | session/prompt.ts; emits `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.iteration.type` on turn-scoped spans | pending | Yes (new attributes appear in OTLP traces if enabled) |
 | 8 | `feat(session): set step-level baggage in runLoop` | session/prompt.ts while body; emits `gen_ai.group.id = "<sessionID>:step-<N>"` | pending | Yes |

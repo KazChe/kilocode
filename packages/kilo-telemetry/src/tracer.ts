@@ -1,9 +1,10 @@
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node"
-import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base"
+import { BatchSpanProcessor, SimpleSpanProcessor, type SpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { resourceFromAttributes } from "@opentelemetry/resources"
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions"
 import type { Tracer } from "@opentelemetry/api"
 import { BaggageSpanProcessor } from "@opentelemetry/baggage-span-processor"
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
 import { PostHogSpanExporter } from "./otel-exporter.js"
 import { Client } from "./client.js"
 
@@ -25,6 +26,12 @@ export namespace TracerSetup {
     platform: string
     editorName?: string
     vscodeVersion?: string
+    otlpExport?: {
+      enabled?: boolean
+      endpoint?: string
+      headers?: Record<string, string>
+      recordContent?: boolean
+    }
   }): Tracer {
     if (tracer) return tracer
 
@@ -42,15 +49,37 @@ export namespace TracerSetup {
     })
     exporter.setEnabled(options.enabled)
 
+    // BaggageSpanProcessor must precede the exporter processors so baggage
+    // entries (e.g. gen_ai.group.id) are copied onto span attributes before
+    // export. Filtered to the gen_ai.* namespace.
+    const spanProcessors: SpanProcessor[] = [
+      new BaggageSpanProcessor(BAGGAGE_KEY_FILTER),
+      new SimpleSpanProcessor(exporter),
+    ]
+
+    // Optionally add an OTLP exporter for vendor-neutral GenAI observability
+    // (Phoenix, Arize, Galileo, Jaeger, Tempo, etc). PostHog flow above is
+    // unaffected; both exporters see the same enriched spans.
+    if (options.otlpExport?.enabled) {
+      if (!options.otlpExport.endpoint) {
+        console.warn(
+          "[kilo-telemetry] experimental.otlp_export.enabled=true but otlp_export.endpoint is missing; skipping OTLP exporter setup.",
+        )
+      } else {
+        const otlpExporter = new OTLPTraceExporter({
+          url: options.otlpExport.endpoint,
+          headers: options.otlpExport.headers,
+        })
+        spanProcessors.push(new BatchSpanProcessor(otlpExporter))
+      }
+    }
+
     provider = new NodeTracerProvider({
       resource: resourceFromAttributes({
         [ATTR_SERVICE_NAME]: options.appName,
         [ATTR_SERVICE_VERSION]: options.version,
       }),
-      // BaggageSpanProcessor must precede the exporter processor so baggage
-      // entries (e.g. gen_ai.group.id) are copied onto span attributes before
-      // export. Filtered to the gen_ai.* namespace.
-      spanProcessors: [new BaggageSpanProcessor(BAGGAGE_KEY_FILTER), new SimpleSpanProcessor(exporter)],
+      spanProcessors,
     })
 
     // Register the provider globally so all tracers use our exporter

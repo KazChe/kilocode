@@ -21,7 +21,17 @@ export namespace Telemetry {
     platform: process.platform,
   }
 
-  export async function init(options: { dataPath: string; version: string; enabled: boolean }): Promise<void> {
+  export async function init(options: {
+    dataPath: string
+    version: string
+    enabled: boolean
+    otlpExport?: {
+      enabled?: boolean
+      endpoint?: string
+      headers?: Record<string, string>
+      recordContent?: boolean
+    }
+  }): Promise<void> {
     if (initialized) return
 
     Identity.setDataPath(options.dataPath)
@@ -52,6 +62,7 @@ export namespace Telemetry {
       platform: props.platform,
       editorName: props.editorName,
       vscodeVersion: props.vscodeVersion,
+      otlpExport: options.otlpExport,
     })
 
     await Identity.getMachineId()

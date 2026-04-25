@@ -145,10 +145,19 @@ let cli = yargs(args) // kilocode_change
 
     // kilocode_change start - Initialize telemetry
     const globalCfg = await Config.getGlobal()
+    const otlpCfg = globalCfg.experimental?.otlp_export
     await Telemetry.init({
       dataPath: Global.Path.data,
       version: InstallationVersion,
       enabled: globalCfg.experimental?.openTelemetry !== false,
+      otlpExport: otlpCfg
+        ? {
+            enabled: otlpCfg.enabled,
+            endpoint: otlpCfg.endpoint,
+            headers: otlpCfg.headers,
+            recordContent: otlpCfg.record_content,
+          }
+        : undefined,
     })
 
     // Migrate legacy Kilo CLI auth if needed

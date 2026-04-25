@@ -251,6 +251,19 @@ const InfoSchema = Schema.Struct({
         description: "Enable telemetry. Set to false to opt-out.",
       }),
       // kilocode_change end
+      // kilocode_change start - OTLP export (OTel GenAI causality/grouping prototype)
+      otlp_export: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean),
+          endpoint: Schema.optional(Schema.String),
+          headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+          record_content: Schema.optional(Schema.Boolean),
+        }),
+      ).annotate({
+        description:
+          "OTLP export for OTel traces (AI SDK and execute_tool spans). Sends to an external backend in addition to the existing PostHog flow. See OTEL_INSTRUMENTATION_PLAN.md.",
+      }),
+      // kilocode_change end
       primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
         description: "Tools that should only be available to primary agents.",
       }),

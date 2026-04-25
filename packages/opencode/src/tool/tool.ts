@@ -1,5 +1,7 @@
 import z from "zod"
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
+import { context, SpanStatusCode } from "@opentelemetry/api" // kilocode_change - execute_tool span
+import { CausalityCarrier, Telemetry } from "@kilocode/kilo-telemetry" // kilocode_change - execute_tool span
 import type { MessageV2 } from "../session/message-v2"
 import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
@@ -76,13 +78,32 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
       const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
+        // kilocode_change start - execute_tool span (OTel GenAI causality, #3662)
+        //
+        // Replaces the previous `Effect.withSpan("Tool.execute")` with a span
+        // emitted via kilo-telemetry's NodeTracerProvider so the
+        // BaggageSpanProcessor (commit 4) copies turn-level baggage onto the
+        // span as attributes (gen_ai.conversation.id, gen_ai.agent.id,
+        // gen_ai.group.iteration.type from commit 7).
+        //
+        // Parent context is the carrier captured in
+        // session/processor.ts case "tool-call" (commit 9) keyed by the
+        // model-assigned tool call ID. This is the proposal's out-of-band
+        // correlation pattern, recovering the parent-child causal link from
+        // the LLM call to the tool execution. Falls back to context.active()
+        // when no carrier is captured (e.g. tool invoked outside an LLM-driven
+        // flow). See "Instrumentation roles and proposal alignment" in
+        // OTEL_INSTRUMENTATION_PLAN.md.
         const attrs = {
-          "tool.name": id,
+          "gen_ai.operation.name": "execute_tool",
+          "gen_ai.tool.name": id,
+          ...(ctx.callID ? { "gen_ai.tool.call.id": ctx.callID } : {}),
           "session.id": ctx.sessionID,
           "message.id": ctx.messageID,
-          ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
-        return Effect.gen(function* () {
+        // kilocode_change end
+
+        const body = Effect.gen(function* () {
           yield* Effect.try({
             try: () => toolInfo.parameters.parse(args),
             catch: (error) => {
@@ -110,7 +131,31 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
               ...(truncated.truncated && { outputPath: truncated.outputPath }),
             },
           }
-        }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
+        }).pipe(Effect.orDie)
+
+        // kilocode_change start - bracket body with execute_tool span lifecycle
+        return Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const tracer = Telemetry.getTracer()
+            if (!tracer) return undefined
+            const carrier = ctx.callID ? CausalityCarrier.extract(ctx.callID) : undefined
+            const parent = carrier ?? context.active()
+            return tracer.startSpan("execute_tool", { attributes: attrs }, parent)
+          }),
+          () => body,
+          (span, exit) =>
+            Effect.sync(() => {
+              if (!span) return
+              if (Exit.isFailure(exit)) {
+                span.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: Cause.pretty(exit.cause),
+                })
+              }
+              span.end()
+            }),
+        )
+        // kilocode_change end
       }
       return toolInfo
     })

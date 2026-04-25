@@ -49,6 +49,87 @@ that the Python prototype repo does not cover.
 | OTLP export | Opt-in via config flag | Default off; existing PostHog flow unchanged. |
 | Carrier mechanism | In-memory `Map<toolCallId, SpanContext>` | Single-process, no cross-framework serialization needed. |
 
+## Architecture (validated)
+
+This section captures findings discovered while reading the codebase post-pull
+(652 commits since initial recon). Two of these change how the implementation
+should land. Both are reflected in the commit table below.
+
+### Two TracerProviders coexist
+
+Kilo runs **two independent OTel TracerProviders**, linked by a shared global
+context manager. Spans flow to different exporters depending on origin.
+
+| Provider | Source | Spans produced | Exporter |
+|---|---|---|---|
+| `@effect/opentelemetry/NodeSdk` | [packages/opencode/src/effect/observability.ts:70-95](packages/opencode/src/effect/observability.ts#L70-L95) | All `Effect.fn` spans (Session.create, SessionPrompt.prompt, SessionPrompt.run, …) | OTLP (when `OTEL_EXPORTER_OTLP_ENDPOINT` env var set) |
+| `NodeTracerProvider` from kilo-telemetry | [packages/kilo-telemetry/src/tracer.ts](packages/kilo-telemetry/src/tracer.ts) | Vercel AI SDK spans (`ai.streamText`, `ai.toolCall`, …) and our future `execute_tool` spans | PostHog (with content filtering) |
+
+Critically, [observability.ts:75-85](packages/opencode/src/effect/observability.ts#L75-L85)
+explicitly registers an `AsyncLocalStorageContextManager` as the global OTel
+context manager. Without it, AI SDK spans would not see Effect spans as
+parents and every AI SDK span would start a new trace. With it, both
+providers' spans share trace IDs and form a unified logical tree, even though
+each provider exports through a different pipeline.
+
+### Implication for our OTLP work
+
+The OTLP path already exists for Effect spans, gated by env var. **What's
+missing is OTLP for the kilo-telemetry side**: AI SDK spans + our future
+`execute_tool` spans currently flow only to PostHog.
+
+The fix: add OTLP as a second exporter on kilo-telemetry's `NodeTracerProvider`
+(alongside the existing PostHog exporter). This keeps PostHog unchanged and
+adds OTLP as a parallel destination for the same spans. Spans from both
+providers end up at the same OTLP endpoint, with shared trace IDs from the
+global context manager, where they reassemble into a single trace tree.
+
+### Q1 (Effect ↔ OTel context propagation): ANSWERED
+
+Validated empirically by [packages/opencode/test/effect/otel-baggage-propagation.test.ts](packages/opencode/test/effect/otel-baggage-propagation.test.ts)
+(8/8 tests pass). Findings:
+
+1. OTel baggage propagates correctly through `Effect.gen` yields,
+   `Effect.fn` spans, `Effect.promise`, `Effect.sleep`, and global tracer
+   span creation. The substrate works.
+2. Setting baggage from inside an Effect requires a small helper. The
+   validated shape:
+
+```ts
+function withBaggage<A, E>(
+  values: Record<string, string>,
+  eff: Effect.Effect<A, E>,
+): Effect.Effect<A, E> {
+  return Effect.callback<A, E>((resume) => {
+    const previousContext = context.active()
+    const existing = propagation.getBaggage(previousContext) ?? propagation.createBaggage()
+    let merged = existing
+    for (const [key, value] of Object.entries(values)) {
+      merged = merged.setEntry(key, { value })
+    }
+    const newContext = propagation.setBaggage(previousContext, merged)
+    context.with(newContext, () => {
+      Effect.runPromise(eff).then(
+        (v) => context.with(previousContext, () => resume(Effect.succeed(v))),
+        (e) => context.with(previousContext, () => resume(Effect.die(e))),
+      )
+    })
+  })
+}
+```
+
+Two properties this helper guarantees and that production code depends on:
+
+- **Merge** new entries with existing baggage. Without merge, setting
+  step-level `gen_ai.group.id` would clobber turn-level
+  `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.iteration.type`.
+- **Restore** outer context on resume. Without restore, inner-scope baggage
+  leaks back to outer code that runs after the inner Effect completes.
+
+This helper will be extracted into a shared module (likely
+`packages/kilo-telemetry/src/baggage.ts` or similar) when we wire up turn-level
+and step-level baggage in commits 7 and 8.
+
 ## Span hierarchy: before and after
 
 ### Before (current state)
@@ -252,6 +333,10 @@ implementation.
 
 ### Q1. Does OTel context propagate across Effect.gen yields?
 
+**Status: ANSWERED (yes).** See "Architecture (validated) → Q1" above for the
+validated `withBaggage` helper pattern. Original concern preserved below for
+historical context.
+
 Effect.fn creates spans via Effect's own tracing integration. OTel's default
 context manager uses `AsyncLocalStorage` (Node), which generally survives
 async function boundaries. Effect runs generators in its own runtime; need to
@@ -264,6 +349,12 @@ that sets baggage in an Effect.gen, yields several times (including across an
 await), creates a child span, and verifies the baggage is present on the
 child span. If yes, the plan as drafted works. If no, we need a different
 mechanism for baggage propagation inside Effect.
+
+**Outcome:** validated by [packages/opencode/test/effect/otel-baggage-propagation.test.ts](packages/opencode/test/effect/otel-baggage-propagation.test.ts),
+8/8 tests passing. The substrate works (AsyncLocalStorage survives Effect's
+runtime); the production helper requires merge-with-existing-baggage and
+restore-outer-context-on-resume semantics, both now baked into the validated
+helper shape.
 
 ### Q2. Carrier map cleanup if extract is never called
 
@@ -325,13 +416,14 @@ so content present in spans is still stripped before send to PostHog.
 
 Before merging any code, validate the design with two micro-experiments:
 
-1. **OTel + Effect baggage propagation test.** A 50-line test that sets
-   baggage, runs an Effect.gen with multiple yields, and asserts baggage is
-   on a child span. Resolves Q1.
+1. **OTel + Effect baggage propagation test.** ✅ **DONE.**
+   [packages/opencode/test/effect/otel-baggage-propagation.test.ts](packages/opencode/test/effect/otel-baggage-propagation.test.ts),
+   8/8 passing. Resolves Q1.
 
 2. **Sidecar carrier round-trip test.** A test that simulates a tool call
    ID capture/extract cycle and asserts the parent context resolves
-   correctly. Resolves Q2 and Q3 by exercise.
+   correctly. Resolves Q2 and Q3 by exercise. (Pending; lands with commit 6
+   below.)
 
 After implementation, validate the demo path:
 
@@ -347,25 +439,23 @@ After implementation, validate the demo path:
 ## Implementation order (commit-by-commit)
 
 Bottom-up sequencing. Each commit is reviewable in isolation and (commits 1
-through 4) does not change user-visible behavior. Behavior changes start at
-commit 5.
+through 5) does not change user-visible behavior. Behavior changes start at
+commit 7.
 
-| # | Commit | Scope | User-visible? |
-|---|---|---|---|
-| 1 | `docs: add OTel instrumentation plan` | This file | No |
-| 2 | `test: validate OTel context propagation through Effect.gen` | Micro-experiment for Q1, lives as a test in `packages/kilo-telemetry/src/__tests__/`. **Blocks commit 3+ until passing.** | No |
-| 3 | `feat(telemetry): add BaggageSpanProcessor` | kilo-telemetry/src/tracer.ts | No (no baggage set yet) |
-| 4 | `feat(telemetry): add OTLP exporter behind config flag` | kilo-telemetry/src/tracer.ts + new exporter wiring + config schema | No (default off) |
-| 5 | `feat(telemetry): add CausalityCarrier module` | New `packages/kilo-telemetry/src/causality-carrier.ts` + tests | No (not wired yet) |
-| 6 | `feat(session): set turn-level baggage in SessionPrompt.prompt` | session/prompt.ts; emits `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.iteration.type` on turn-scoped spans | Yes (new attributes appear in OTLP traces if enabled) |
-| 7 | `feat(session): set step-level baggage in runLoop` | session/prompt.ts while body; emits `gen_ai.group.id = "<sessionID>:step-<N>"` | Yes |
-| 8 | `feat(session): capture LLM/tool-call carrier in processor` | session/processor.ts case "tool-call" | No (capture-only, not extracted yet) |
-| 9 | `feat(tool): emit execute_tool span with causal parent` | tool/tool.ts wrap | Yes — capstone; causality tree appears in OTLP traces |
-| 10 | `feat(telemetry): thread recordContent flag to Vercel AI SDK` | session/llm.ts, kilo-telemetry config | Yes (when otlpExport.recordContent=true) |
-| 11 | `docs(telemetry): OTLP configuration recipe` | README in kilo-telemetry or top-level | No |
-
-If commit 2 fails (Effect does not preserve OTel context across yields), the
-plan needs revision before commits 3+ proceed. See Q1.
+| # | Commit | Scope | Status | User-visible? |
+|---|---|---|---|---|
+| 1 | `docs: add OTel instrumentation plan` | This file | ✅ done | No |
+| 2 | `test: validate OTel baggage propagation through Effect.gen and Effect.fn` | [packages/opencode/test/effect/otel-baggage-propagation.test.ts](packages/opencode/test/effect/otel-baggage-propagation.test.ts), 8/8 passing | ✅ done | No |
+| 3 | `docs: update plan with validation results + dual-provider architecture` | This file | ⏳ this commit | No |
+| 4 | `feat(telemetry): add BaggageSpanProcessor to kilo-telemetry` | [packages/kilo-telemetry/src/tracer.ts](packages/kilo-telemetry/src/tracer.ts) | pending | No (no baggage set yet) |
+| 5 | `feat(telemetry): add OTLP exporter to kilo-telemetry behind config flag` | kilo-telemetry adds OTLP as a second exporter alongside PostHog (Effect spans already export to OTLP via observability.ts; this adds AI SDK spans + future execute_tool spans to OTLP) | pending | No (default off) |
+| 6 | `feat(telemetry): add CausalityCarrier module + withBaggage helper` | New `packages/kilo-telemetry/src/causality-carrier.ts` and `packages/kilo-telemetry/src/baggage.ts` (the validated `withBaggage` helper) + tests | pending | No (not wired yet) |
+| 7 | `feat(session): set turn-level baggage in SessionPrompt.prompt` | session/prompt.ts; emits `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.iteration.type` on turn-scoped spans | pending | Yes (new attributes appear in OTLP traces if enabled) |
+| 8 | `feat(session): set step-level baggage in runLoop` | session/prompt.ts while body; emits `gen_ai.group.id = "<sessionID>:step-<N>"` | pending | Yes |
+| 9 | `feat(session): capture LLM/tool-call carrier in processor` | session/processor.ts case "tool-call" | pending | No (capture-only, not extracted yet) |
+| 10 | `feat(tool): emit execute_tool span with causal parent` | tool/tool.ts wrap | pending | Yes — capstone; causality tree appears in OTLP traces |
+| 11 | `feat(telemetry): thread recordContent flag to Vercel AI SDK` | session/llm.ts, kilo-telemetry config | pending | Yes (when otlpExport.recordContent=true) |
+| 12 | `docs(telemetry): OTLP configuration recipe` | README in kilo-telemetry or top-level | pending | No |
 
 ## References
 

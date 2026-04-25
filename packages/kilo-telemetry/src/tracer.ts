@@ -4,7 +4,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources"
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions"
 import type { Tracer } from "@opentelemetry/api"
 import { BaggageSpanProcessor } from "@opentelemetry/baggage-span-processor"
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto"
 import { PostHogSpanExporter } from "./otel-exporter.js"
 import { Client } from "./client.js"
 

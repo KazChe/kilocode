@@ -115,17 +115,17 @@ non-Python-agent-framework data point to the same proposal pattern.
 |---|---|---|
 | `gen_ai.group.id` semantics | Per-step (Interpretation A) | Matches the proposal's own example (`round-2`). Session identity carried by existing `gen_ai.conversation.id`. |
 | `gen_ai.group.iteration.type` value | Both `gen_ai.agent.id` (Kilo agent name, literal) and `gen_ai.group.iteration.type` (generalized taxonomy) | Option (c). Lets backends filter on either. |
-| Iteration boundary | One pass through the `while` body in [`SessionPrompt.run`](packages/opencode/src/session/prompt.ts#L1340), indexed by the local `step` integer at [prompt.ts:1349](packages/opencode/src/session/prompt.ts#L1349) | Each pass is one LLM round-trip plus its tool executions. |
+| Iteration boundary | One pass through the `while` body in [`SessionPrompt.run`](packages/opencode/src/session/prompt.ts#L1340) — equivalently, one call to `LLM.run` (where the baggage is actually set; see Decisions row on `withBaggage` below). Indexed by a per-`sessionID` monotonic counter (`STEP_COUNTERS` map in [`session/llm.ts`](packages/opencode/src/session/llm.ts)). | Each pass is one LLM round-trip plus its tool executions. The runLoop's local `step` integer at [prompt.ts:1349](packages/opencode/src/session/prompt.ts#L1349) is logically equivalent but not what we use to label spans. |
 | Span links | Not used | Per #3662 stated stance. |
 | Vercel AI SDK tool spans | Layer our `execute_tool` span on top, accept duplication | Reversible; revisit after v0. |
 | OTLP export | Opt-in via config flag | Default off; existing PostHog flow unchanged. |
 | OTLP config shape | `experimental.otlp_export.{enabled, endpoint, headers, record_content}` (snake_case) | Matches existing `experimental.*` snake_case convention. The pre-existing `openTelemetry` field is the only camelCase outlier. Internal TS function signatures use camelCase (`otlpExport`, `recordContent`) with explicit field mapping at the [`opencode/src/index.ts`](packages/opencode/src/index.ts) bridge. |
 | OTLP misconfiguration | `enabled=true` with missing `endpoint` → `console.warn` and skip OTLP setup | Graceful degradation. PostHog flow unaffected; no crash. |
-| OTLP processor | `BatchSpanProcessor` wrapping `OTLPTraceExporter` from `@opentelemetry/exporter-trace-otlp-http` | PostHog stays on `SimpleSpanProcessor` (small, sync flush). OTLP needs batching for network efficiency. Default batch params (queue 2048, delay 5s) are fine for v0. |
+| OTLP processor | `BatchSpanProcessor` wrapping `OTLPTraceExporter` from `@opentelemetry/exporter-trace-otlp-proto` (protobuf encoding) | PostHog stays on `SimpleSpanProcessor` (small, sync flush). OTLP needs batching for network efficiency. Default batch params (queue 2048, delay 5s) are fine for v0. **Originally used `-http` (JSON), but Arize Phoenix and several other OTLP receivers reject `application/json` at `/v1/traces` with 415 Unsupported Media Type. Switched to `-proto` after empirical confirmation.** |
 | Span processor order | `[BaggageSpanProcessor, SimpleSpanProcessor (PostHog), BatchSpanProcessor (OTLP, when enabled)]` | BaggageSpanProcessor MUST be first so baggage is copied onto span attributes before any exporter sees the span. Both exporters then receive the same enriched spans. |
 | Carrier mechanism | In-memory `Map<toolCallId, Context>` | Single-process, no cross-framework serialization needed. Stores full OTel `Context` (not just `SpanContext`) so baggage at capture time is preserved when extracted as parent context for the `execute_tool` span. |
 | Helper module split | `CausalityCarrier` lives in `packages/kilo-telemetry/src/causality-carrier.ts` (pure OTel, no Effect dep). `withBaggage` lives in `packages/opencode/src/effect/otel-baggage.ts` (Effect-aware, depends on `effect` package). | Keeps kilo-telemetry decoupled from the Effect runtime so it stays usable as a pure OTel module. The Effect-aware bridge lives where Effect is already a dependency. |
-| `withBaggage` signature | `<A, E>` (R = never; caller pre-resolves dependencies) | Tried Effect 3's `Effect.runtime<R>()` / `Runtime.runPromise(rt)(eff)` pattern: those APIs do not exist in Effect 4. Tried Effect 4's `Effect.callback<A, E, R>` with `resume(eff)` to delegate execution to the runtime: that approach typechecks but **does not propagate AsyncLocalStorage** at the resume call site, so the inner Effect runs in the outer OTel context, not the new one. Only `Effect.runPromise(eff).then(...)` propagates correctly (because `runPromise` returns a real Promise whose microtask captures AsyncLocalStorage at `.then` registration time). `runPromise` requires R = never, so the helper signature is constrained accordingly. Production wiring (commits 7+) will set turn-level baggage at the external `runPromise` boundary in [`session/prompt.ts:1971`](packages/opencode/src/session/prompt.ts#L1971), where AsyncLocalStorage propagates cleanly without needing this helper. Step-level baggage strategy will be decided at commit 8 once we have the turn-level wiring landed. |
+| `withBaggage` signature | `<A, E>` (R = never; caller pre-resolves dependencies) | Tried Effect 3's `Effect.runtime<R>()` / `Runtime.runPromise(rt)(eff)` pattern: those APIs do not exist in Effect 4. Tried Effect 4's `Effect.callback<A, E, R>` with `resume(eff)` to delegate execution to the runtime: that approach typechecks but **does not propagate AsyncLocalStorage** at the resume call site, so the inner Effect runs in the outer OTel context, not the new one. Only `Effect.runPromise(eff).then(...)` propagates correctly (because `runPromise` returns a real Promise whose microtask captures AsyncLocalStorage at `.then` registration time). `runPromise` requires R = never, so the helper signature is constrained accordingly. **Note:** the original plan was to use this helper for turn-level baggage at [`session/prompt.ts:1971`](packages/opencode/src/session/prompt.ts#L1971). Empirically that wrapper turned out to be bypassed by all production paths (extension/CLI/TUI go SDK→server→`svc.prompt(...)` directly). Production baggage now lands at [`LLM.run`](packages/opencode/src/session/llm.ts) immediately before `streamText({...})` using `context.with(setBaggage(...), ...)` directly (no helper needed at this site, because we wrap a synchronous call rather than an Effect). The `withBaggage` helper remains useful for any future direct programmatic Session.prompt(input) caller, and is retained as defense-in-depth. |
 
 ## Architecture (validated)
 
@@ -511,14 +511,69 @@ Before merging any code, validate the design with two micro-experiments:
 
 After implementation, validate the demo path:
 
-3. **End-to-end trace visual.** Run a Kilo task locally that exercises
-   multiple tool calls (e.g. "read auth.ts, find callers via grep, edit one,
-   run tests"). Export OTLP to a local Phoenix or Jaeger. Confirm:
-   - `execute_tool` spans are children of the specific `doStream`
-   - `gen_ai.group.id` increments per step
-   - `gen_ai.agent.id`, `gen_ai.conversation.id`, `gen_ai.group.iteration.type`
-     are present on every span in the trace tree
-   - Vercel's `ai.toolCall` spans coexist (duplication acknowledged)
+3. **End-to-end trace visual.** ✅ **DONE 2026-04-25.** See "Validation
+   results against Phoenix" below.
+
+## Validation results against Phoenix (2026-04-25)
+
+Ran a multi-round multi-tool session via the dev CLI (`bun run dev run "..."`)
+against a local Phoenix container (`arizephoenix/phoenix:latest`, ports
+6006 UI / 4317 gRPC / 4318 HTTP, with our config pointing OTLP HTTP at
+`http://localhost:6006/v1/traces`). One observed turn yielded four LLM
+rounds, all sharing one `gen_ai.conversation.id`:
+
+| Step | Agent | Tool calls | Trace shape |
+|---|---|---|---|
+| `step-1` | `title` (Kilo's hidden auto-title agent) | None | `ai.streamText` → `ai.streamText.doStream` |
+| `step-2` | `code` | 1 × bash | `ai.streamText` → `doStream` + `ai.toolCall` → **`execute_tool`** |
+| `step-3` | `code` | 1 × bash | same shape as step-2 |
+| `step-4` | `code` | None (final response) | `ai.streamText` → `doStream` |
+
+What was confirmed working end-to-end:
+
+- ✅ **Causality (#3662)**: every `execute_tool` span parented under
+  Vercel's `ai.toolCall`, which is itself under `ai.streamText`. Each
+  carries the unique `gen_ai.tool.call.id` matching the LLM's tool_call
+  output.
+- ✅ **Step-level grouping (#3661)**: `gen_ai.group.id` increments
+  per LLM round (`step-1`, `step-2`, …) and is identical across all spans
+  within one round.
+- ✅ **Turn-level grouping (#3661)**: `gen_ai.conversation.id`,
+  `gen_ai.agent.id`, `gen_ai.group.iteration.type` appear on every span
+  via `BaggageSpanProcessor`.
+- ✅ **OTel GenAI semconv-aligned attribute names** for all
+  prototype-emitted attributes.
+- ✅ **OTLP delivery** via `@opentelemetry/exporter-trace-otlp-proto`.
+  PostHog flow unaffected.
+
+Architectural surprises that the run surfaced (now reflected in the
+Decisions table and commits 10a / 10b):
+
+- **`@opentelemetry/exporter-trace-otlp-http` sends JSON; Phoenix's OTLP
+  HTTP receiver only accepts protobuf** at `/v1/traces`. The JSON
+  exporter was returning 415 Unsupported Media Type before any spans
+  could land. Switched to the `-proto` package.
+- **All Kilo production paths bypass commit 7's wrapper at
+  `session/prompt.ts:1971`.** Extension, `kilo run`, and TUI all go
+  SDK → server route handler → `svc.prompt(...)` directly, never
+  through the exported `prompt()` function we wrapped. Baggage now
+  lands at `LLM.run` immediately before `streamText({...})`, where
+  every code path converges. Commit 7's wrapper stays as
+  defense-in-depth for any future direct programmatic caller.
+- **Each Vercel `ai.streamText` becomes its own trace** (root span),
+  not a child of any Effect.fn ancestor, because `@effect/opentelemetry`'s
+  separate provider only exports to OTLP via `OTEL_EXPORTER_OTLP_ENDPOINT`
+  env var (and would also need its own switch to `-proto` to land in
+  Phoenix). Multi-trace per turn is acceptable for the demo: causality
+  is preserved within each trace, and grouping attributes link them
+  across traces. Single-trace-per-turn would require either env-var
+  setup + Effect-side proto fix, or an explicit kilo-telemetry-tracer
+  parent span at the runPromise boundary. Neither is currently in
+  scope.
+- **The `title` agent shares the step counter** with the user's actual
+  agent (both keyed by sessionID). In observed traces, `step-1` belonged
+  to title generation and `step-2..N` to the code agent. Acceptable v0
+  quirk; can be split per-agent later if needed.
 
 ## Implementation order (commit-by-commit)
 
@@ -537,9 +592,12 @@ commit 7.
 | 6 | `feat(telemetry): add CausalityCarrier module + withBaggage helper` | New `packages/kilo-telemetry/src/causality-carrier.ts` (pure OTel) and new `packages/opencode/src/effect/otel-baggage.ts` (Effect-aware helper with `<A, E>` signature; R = never). | ✅ done | No (not wired yet) |
 | 7 | `feat(session): set turn-level baggage in SessionPrompt.prompt` | Wraps the external `prompt(input)` boundary at [`session/prompt.ts:1971`](packages/opencode/src/session/prompt.ts#L1971) with `context.with(setBaggage(...), () => runPromise(...))`. Adds inline `mapAgentToIterationType` and `buildTurnBaggage` helpers. Emits `gen_ai.conversation.id` always, plus `gen_ai.agent.id` and `gen_ai.group.iteration.type` when `input.agent` is provided. Avoids the R-limitation by setting baggage outside Effect; AsyncLocalStorage carries it through. Unit tests for the helpers. `loop` and `cancel` exports are not wrapped (out of scope for v0). | ✅ done | Yes (turn attributes appear on every span in the trace tree when `experimental.otlp_export.enabled=true`) |
 | 7a | `docs: capture instrumentation roles and proposal alignment` | New "Instrumentation roles and proposal alignment" section in this file framing the dual-role we play in Kilo and mapping `processor.ts` capture to the #3662 out-of-band correlation pattern. | ✅ done | No |
-| 8 | `feat(session): set step-level baggage in runLoop` | session/prompt.ts while body; emits `gen_ai.group.id = "<sessionID>:step-<N>"`. Strategy decision (Approach A vs B vs other) deferred until commits 9 and 10 produce real trace output we can inspect. | **deferred** | Yes (when implemented) |
+| 8 | `feat(session): set step-level baggage in runLoop` | Originally planned at the runLoop while body. **Re-scoped to the LLM.run boundary** (commit 10b) where it piggybacks on the same site as turn-level baggage. Each `LLM.run` call increments a per-`sessionID` step counter and adds `gen_ai.group.id = "<sessionID>:step-<N>"` to the OTel baggage, alongside conversation/agent/iteration entries. All spans created by that LLM round (Vercel `ai.streamText`, `ai.streamText.doStream`, `ai.toolCall`, our `execute_tool`) inherit the same group.id via baggage propagation. | ✅ done (via 10b) | Yes |
 | 9 | `feat(session): capture LLM/tool-call carrier in processor` | [`session/processor.ts` `case "tool-call":`](packages/opencode/src/session/processor.ts#L298). One-line `CausalityCarrier.capture(value.toolCallId, context.active())` plus imports. See "Instrumentation roles and proposal alignment" above for why this site (consumer) plays the role of "the instrumentor" from the #3662 out-of-band correlation pattern, analogous to how the Python prototype handles AutoGen, LlamaIndex, and CrewAI. | ✅ done | No (capture-only, not extracted yet) |
-| 10 | (this commit) `feat(tool): emit execute_tool span with causal parent` | [`tool/tool.ts` `Tool.wrap`](packages/opencode/src/tool/tool.ts#L78) replaces the existing `Effect.withSpan("Tool.execute")` with a span emitted via kilo-telemetry's tracer (so `BaggageSpanProcessor` copies turn-level baggage onto attributes). Parent context comes from `CausalityCarrier.extract(ctx.callID)` (commit 9 capture), falling back to `context.active()` when no carrier is captured. Attributes: `gen_ai.operation.name="execute_tool"`, `gen_ai.tool.name`, `gen_ai.tool.call.id` (when present), plus `session.id` and `message.id` (Kilo-specific debug). Span status set to ERROR with `Cause.pretty` message on Exit failure. | ⏳ this commit | Yes — capstone; causality tree appears in OTLP traces |
+| 10 | `feat(tool): emit execute_tool span with causal parent` | [`tool/tool.ts` `Tool.wrap`](packages/opencode/src/tool/tool.ts#L78) replaces the existing `Effect.withSpan("Tool.execute")` with a span emitted via kilo-telemetry's tracer (so `BaggageSpanProcessor` copies turn-level baggage onto attributes). Parent context comes from `CausalityCarrier.extract(ctx.callID)` (commit 9 capture), falling back to `context.active()` when no carrier is captured. Attributes: `gen_ai.operation.name="execute_tool"`, `gen_ai.tool.name`, `gen_ai.tool.call.id` (when present), plus `session.id` and `message.id` (Kilo-specific debug). Span status set to ERROR with `Cause.pretty` message on Exit failure. | ✅ done | Yes — capstone; causality tree appears in OTLP traces |
+| 10a | `fix(telemetry): switch OTLP trace exporter from -http (JSON) to -proto` | Empirically required: Phoenix and most OTLP receivers reject JSON at `/v1/traces` with 415 Unsupported Media Type. Switched [`kilo-telemetry/src/tracer.ts`](packages/kilo-telemetry/src/tracer.ts) import + added `@opentelemetry/exporter-trace-otlp-proto` dep. Same exporter API; protobuf wire encoding. | ✅ done | No (transport-level fix; was preventing v0 from working at all) |
+| 10b | `feat(session): set turn + step baggage at streamText boundary in LLM.run` | Combined fix for commit 7 (turn) and commit 8 (step). Production paths bypass commit 7's wrapper at [`session/prompt.ts:1971`](packages/opencode/src/session/prompt.ts#L1971); LLM.run is the bottleneck where every code path converges before AI SDK calls. Sets `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.iteration.type`, **and `gen_ai.group.id = "<sessionID>:step-<N>"`** in baggage immediately before `streamText({...})`. AsyncLocalStorage carries the OTel context through synchronous span creation and async event delivery; BaggageSpanProcessor copies entries onto every span. | ✅ done | Yes — turn + step attributes appear on every span in OTLP traces |
+| 10c | (this commit) `docs: capture proto fix, LLM.run baggage site, and Phoenix validation results` | This file: Decisions table entries for the OTLP `-proto` switch and the LLM.run baggage site; implementation order updates marking 8 and 10 done with notes on the re-scoping; new "Validation against Phoenix (2026-04-25)" section capturing the empirical results. | ⏳ this commit | No |
 | 11 | `feat(telemetry): thread recordContent flag to Vercel AI SDK` | session/llm.ts, kilo-telemetry config | pending | Yes (when otlpExport.recordContent=true) |
 | 12 | `docs(telemetry): OTLP configuration recipe` | README in kilo-telemetry or top-level | pending | No |
 

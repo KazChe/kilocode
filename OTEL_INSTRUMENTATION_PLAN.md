@@ -529,6 +529,66 @@ rounds, all sharing one `gen_ai.conversation.id`:
 | `step-3` | `code` | 1 × bash | same shape as step-2 |
 | `step-4` | `code` | None (final response) | `ai.streamText` → `doStream` |
 
+### Trace gallery
+
+Each Vercel `ai.streamText` becomes its own root span (architectural surprise; see below), so the four LLM rounds above produce four separate traces. All four share `gen_ai.conversation.id = ses_23a3695afffesb1aie4rD03xAk`; each carries a unique `gen_ai.group.id`.
+
+**step-1 (auto-title agent, no tools)**
+
+![step-1 streamText root](images/otel-genai/01_step1_title_streamtext.png)
+
+*`ai.streamText` root span. `gen_ai.agent.id: title`, `gen_ai.group.id: …:step-1`, `gen_ai.group.iteration.type: react`. Title agent runs once per turn before the user-visible agent.*
+
+![step-1 doStream](images/otel-genai/02_step1_title_dostream.png)
+
+*`doStream` child inherits the same baggage attributes via `BaggageSpanProcessor`.*
+
+**step-2 (code agent, first bash tool round)**
+
+![step-2 streamText tree](images/otel-genai/03_step2_code_streamtext_tree.png)
+
+*Full causality tree visible: `ai.streamText` → `ai.streamText.doStream` + `ai.toolCall` → `execute_tool`. `agent.id: code`, `iteration.type: code_react`, `group.id: …:step-2`.*
+
+![step-2 doStream](images/otel-genai/04_step2_code_dostream.png)
+
+*`doStream` for step-2's LLM round.*
+
+![step-2 toolCall](images/otel-genai/05_step2_code_toolcall.png)
+
+*Vercel's `ai.toolCall` span. `tool_call.id: toolu_bdrk_011Qc3MgXEq1vTNyyi3VKGHg`, `tool.name: bash`. Grouping baggage attributes appear here too because `BaggageSpanProcessor` runs on every span the kilo-telemetry tracer produces, regardless of who originated it.*
+
+![step-2 execute_tool](images/otel-genai/06_step2_code_execute_tool.png)
+
+*Our `execute_tool` span. The matching `gen_ai.tool.call.id` proves the out-of-band carrier handoff worked. `gen_ai.operation.name: execute_tool` per the OTel GenAI semconv. `session.id` and `message.id` are Kilo-specific debug context.*
+
+**step-3 (code agent, second bash tool round)**
+
+![step-3 streamText tree](images/otel-genai/07_step3_code_streamtext_tree.png)
+
+*Same shape as step-2 with `gen_ai.group.id: …:step-3`. Confirms the step counter increments per LLM round within the same conversation.*
+
+![step-3 doStream](images/otel-genai/08_step3_code_dostream.png)
+
+*`doStream` for step-3.*
+
+![step-3 toolCall](images/otel-genai/09_step3_code_toolcall.png)
+
+*Vercel `ai.toolCall` for step-3. New `tool_call.id: toolu_bdrk_01QTpbRmPUzWTnPzjsotAwm4`, distinct from step-2's id.*
+
+![step-3 execute_tool](images/otel-genai/10_step3_code_execute_tool.png)
+
+*Our `execute_tool` for step-3. Matching `tool.call.id` confirms the carrier map correctly distinguishes multiple tool calls within one session.*
+
+**step-4 (code agent, final answer, no tool calls)**
+
+![step-4 streamText final](images/otel-genai/11_step4_code_streamtext_final.png)
+
+*Final LLM round. No tool calls, no `execute_tool`. Tree is just `ai.streamText` → `ai.streamText.doStream`. `group.id: …:step-4`.*
+
+![step-4 doStream](images/otel-genai/12_step4_code_dostream_final.png)
+
+*`doStream` for step-4.*
+
 What was confirmed working end-to-end:
 
 - ✅ **Causality (#3662)**: every `execute_tool` span parented under

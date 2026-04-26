@@ -75,6 +75,14 @@ On the LLM and tool spans, you should see:
 
 Causality (#3662): the `execute_tool` span's parent is the LLM span that requested the tool call, even though execution happens out-of-band (parent captured in `processor.ts`, replayed in `tool.ts` via the `CausalityCarrier` map keyed by `tool_call_id`).
 
+![Step-2 trace tree showing causal parent-child](images/otel-genai/03_step2_code_streamtext_tree.png)
+
+*One LLM round in Phoenix: `ai.streamText` → `ai.streamText.doStream` + `ai.toolCall` → `execute_tool`. The `execute_tool` span is parented under the specific tool-call that requested it (#3662 in action). Every span in the tree carries `gen_ai.conversation.id`, `gen_ai.agent.id`, `gen_ai.group.id`, and `gen_ai.group.iteration.type` (#3661 in action).*
+
+![execute_tool span attributes](images/otel-genai/06_step2_code_execute_tool.png)
+
+*The `execute_tool` span emitted by this prototype. Matching `gen_ai.tool.call.id` (`toolu_…3VKGHg`) carries over from the `ai.toolCall` parent via the out-of-band carrier, and `gen_ai.operation.name = execute_tool` follows the OTel GenAI semconv. Grouping attributes (`step-2`, `code_react`, conversation id) propagated automatically as baggage.*
+
 ## 5. Troubleshooting
 
 **No traces in Phoenix?**

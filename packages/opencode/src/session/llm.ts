@@ -417,6 +417,16 @@ const live: Layer.Layer<
       const turnContext = propagation.setBaggage(context.active(), turnBaggage)
       // kilocode_change end
 
+      // kilocode_change start - thread record_content flag to AI SDK telemetry.
+      // When OTLP export is enabled, defaults to true so the user's backend
+      // sees full prompt/completion/tool content. PostHog's exporter strips
+      // these fields independently (see kilo-telemetry/src/otel-exporter.ts
+      // SENSITIVE_ATTRIBUTES), so PostHog never sees content regardless.
+      const recordContent =
+        cfg.experimental?.otlp_export?.enabled === true &&
+        (cfg.experimental?.otlp_export?.record_content ?? true)
+      // kilocode_change end
+
       return context.with(turnContext, () => streamText({
         onError(error) {
           l.error("stream error", {
@@ -496,8 +506,8 @@ const live: Layer.Layer<
         // kilocode_change start - enable telemetry by default with custom PostHog tracer
         experimental_telemetry: {
           isEnabled: cfg.experimental?.openTelemetry !== false,
-          recordInputs: false,
-          recordOutputs: false,
+          recordInputs: recordContent,
+          recordOutputs: recordContent,
           tracer: Telemetry.getTracer() ?? undefined,
         },
         // kilocode_change end

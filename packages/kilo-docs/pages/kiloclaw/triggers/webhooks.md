@@ -5,7 +5,13 @@ description: "Trigger your KiloClaw agent from external events using webhooks"
 
 # Webhooks
 
+{% partial file="kiloclaw-eol.md" /%}
+
 KiloClaw supports inbound webhooks so external events can trigger your agent automatically. Form submissions, alerts, calendar updates, ecommerce orders, IoT sensor data; anything that can send an HTTP request can kick off a conversation with your agent. When a webhook fires, the payload is rendered through a prompt template and delivered as a chat message to your KiloClaw instance. The agent processes and responds as if you typed it yourself.
+
+Webhook triggers are one trigger mode shared by KiloClaw and Cloud Agent. In
+KiloClaw, the rendered prompt is delivered to the KiloClaw instance on this page;
+in Cloud Agent, the same trigger concept starts a Cloud Agent repository session.
 
 ## Setup
 
@@ -41,14 +47,14 @@ You received a webhook event. Here is the payload:
 
 **Available variables:**
 
-| Variable        | Description                   |
-| --------------- | ----------------------------- |
-| `{{body}}`      | Raw request body              |
-| `{{bodyJson}}`  | Pretty-printed JSON body      |
-| `{{method}}`    | HTTP method (e.g., `POST`)    |
-| `{{headers}}`   | Request headers               |
-| `{{path}}`      | Request path                  |
-| `{{query}}`     | Query string parameters       |
+| Variable | Description |
+|---|---|
+| `{{body}}` | Raw request body |
+| `{{bodyJson}}` | Pretty-printed JSON body |
+| `{{method}}` | HTTP method (e.g., `POST`) |
+| `{{headers}}` | Request headers |
+| `{{path}}` | Request path |
+| `{{query}}` | Query string parameters |
 | `{{timestamp}}` | Time the webhook was received |
 
 You can tailor the template to give your agent more context. For example:

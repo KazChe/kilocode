@@ -4,14 +4,18 @@ import type { MessageLoadMode } from "./sessions"
 import type { PermissionFileDiff } from "./permissions"
 import type { ModelSelection, ProviderConfig } from "./providers"
 import type { Config } from "./config"
-import type { ModelAllocation } from "./agent-manager"
-import type {
-  ClearLegacyDataMessage,
-  FinalizeLegacyMigrationMessage,
-  RequestLegacyMigrationDataMessage,
-  SkipLegacyMigrationMessage,
-  StartLegacyMigrationMessage,
-} from "./migration"
+import type { ModelAllocation, ReviewCommentEntry, TerminalDestination, TerminalPlacement } from "./agent-manager"
+import type { PRReviewCommentData, ReviewMessageData } from "../../../../src/shared/review-comments"
+import type { BrowserFeedbackData } from "../../../../src/shared/browser-feedback"
+import type { WorkStyle, WorkStyleState } from "../../../../src/shared/work-style-presets"
+import type { RefreshProviderUsageMessage, RequestProviderUsageMessage } from "./provider-usage"
+import type { AnacondaDesktopWebviewMessage } from "../../../../src/shared/anaconda-desktop-messages"
+import type { RequestMigrationDataMessage, StartMigrationMessage } from "./migration"
+import type { MemoryShowMessage, MemoryOperationMessage, RequestMemoryMessage } from "./memory"
+import type { RequestSessionBoardMessage, ResetSessionBoardMessage } from "./board"
+import type { Activity } from "../../utils/session-activity"
+import type { PRReactionContent } from "../../../agent-manager/pr/pr-types"
+import type { PRMergeRequest } from "../../../../src/shared/pr-comment-actions"
 
 // ============================================
 // Messages FROM webview TO extension
@@ -19,6 +23,7 @@ import type {
 
 export interface SendMessageRequest {
   type: "sendMessage"
+  projectId?: string
   text: string
   messageID?: string
   sessionID?: string
@@ -28,10 +33,41 @@ export interface SendMessageRequest {
   agent?: string
   variant?: string
   files?: FileAttachment[]
+  review?: ReviewMessageData
+  browserFeedback?: BrowserFeedbackData
+  agentManagerContext?: string
+  contextDirectory?: string
+}
+
+export interface ResumeSessionRequest {
+  type: "resumeSession"
+  sessionID: string
+  messageID: string
+  requestID: string
 }
 
 export interface AbortRequest {
   type: "abort"
+  sessionID: string
+  scope?: "session" | "tree"
+}
+
+export interface RequestBackgroundJobsMessage {
+  type: "requestBackgroundJobs"
+  sessionID: string
+  requestID: string
+}
+
+export interface CancelBackgroundJobMessage {
+  type: "cancelBackgroundJob"
+  jobID: string
+  sessionID: string
+  requestID: string
+}
+
+export interface PromoteBackgroundJobMessage {
+  type: "promoteBackgroundJob"
+  jobID: string
   sessionID: string
 }
 
@@ -39,11 +75,19 @@ export interface RevertSessionRequest {
   type: "revertSession"
   sessionID: string
   messageID: string
+  partID?: string
 }
 
 export interface UnrevertSessionRequest {
   type: "unrevertSession"
   sessionID: string
+}
+
+export interface DeleteMessageRequest {
+  type: "deleteMessage"
+  sessionID: string
+  messageID: string
+  requestID?: string
 }
 
 export interface PermissionResponseRequest {
@@ -67,12 +111,19 @@ export interface LoadMessagesRequest {
   type: "loadMessages"
   sessionID: string
   mode?: MessageLoadMode
+  focus?: boolean
   before?: string
   limit?: number
 }
 
 export interface LoadSessionsRequest {
   type: "loadSessions"
+}
+
+export interface RequestSessionModelUsageMessage {
+  type: "requestSessionModelUsage"
+  sessionID: string
+  requestID: string
 }
 
 export interface RequestCloudSessionsMessage {
@@ -101,6 +152,8 @@ export interface ImportAndSendMessage {
   agent?: string
   variant?: string
   files?: FileAttachment[]
+  review?: ReviewMessageData
+  browserFeedback?: BrowserFeedbackData
   command?: string
   commandArgs?: string
 }
@@ -127,6 +180,27 @@ export interface OpenFileRequest {
   filePath: string
   line?: number
   column?: number
+  // Optional session id the file reference was rendered for. When present the
+  // extension resolves the workspace directory from this instead of its live
+  // `currentSession`, so a session switch can't open the wrong worktree's file.
+  sessionID?: string
+}
+
+export interface OpenContentRequest {
+  type: "openContent"
+  content: string
+  language?: string
+}
+
+export interface ValidateFilesRequest {
+  type: "validateFiles"
+  id: string
+  // Explicit session id the candidates were rendered for — the extension
+  // resolves the workspace directory from this instead of its own live
+  // `currentSession`, so a session switch mid-request can't validate paths
+  // against the wrong worktree.
+  sessionID: string
+  paths: string[]
 }
 
 export interface CancelLoginRequest {
@@ -140,6 +214,21 @@ export interface SetOrganizationRequest {
 
 export interface WebviewReadyRequest {
   type: "webviewReady"
+}
+
+export interface WebviewFocusChangedRequest {
+  type: "webviewFocusChanged"
+  focused: boolean
+}
+
+export interface AgentManagerFocusChangedRequest {
+  type: "agentManagerFocusChanged"
+  target: "prompt" | "mainTerminal" | "sideTerminal" | "other"
+}
+
+export interface SelectSourceRequest {
+  type: "selectSource"
+  id: string
 }
 
 export interface RequestProvidersMessage {
@@ -156,6 +245,36 @@ export interface CompactRequest {
 export interface OpenSettingsPanelRequest {
   type: "openSettingsPanel"
   tab?: string
+  projectId?: string
+}
+
+export interface RequestAgentManagerSettingsMessage {
+  type: "requestAgentManagerSettings"
+  projectId?: string
+  requestId: string
+}
+
+export interface RequestAgentManagerSettingsBranchesMessage {
+  type: "requestAgentManagerSettingsBranches"
+  projectId: string
+  requestId: string
+}
+
+export interface SetAgentManagerDefaultBaseBranchMessage {
+  type: "setAgentManagerDefaultBaseBranch"
+  projectId: string
+  branch?: string
+  requestId: string
+}
+
+export interface ConfigureAgentManagerSetupScriptMessage {
+  type: "configureAgentManagerSetupScript"
+  projectId: string
+  requestId: string
+}
+
+export interface OpenProfilePanelRequest {
+  type: "openProfilePanel"
 }
 
 export interface OpenVSCodeSettingsRequest {
@@ -163,8 +282,48 @@ export interface OpenVSCodeSettingsRequest {
   query: string
 }
 
+export interface OpenConfigFileRequest {
+  type: "openConfigFile"
+  scope: "local" | "global"
+  labels: {
+    scope: string
+    statusLoaded: string
+    statusLoadedLegacy: string
+    statusNotLoaded: string
+    statusCreate: string
+    title: string
+    placeholder: string
+    noWorkspace: string
+    openFailed: string
+    sourceXdg: string
+    sourceHomeKilo: string
+    sourceHomeKilocode: string
+    sourceHomeOpencode: string
+    sourceEnvFile: string
+    sourceEnvDir: string
+    sourceEnvContent: string
+    sourceProjectKilo: string
+    sourceProjectRoot: string
+    sourceProjectKilocode: string
+    sourceProjectOpencode: string
+  }
+}
+
 export interface OpenMarketplacePanelRequest {
   type: "openMarketplacePanel"
+  directory?: string
+}
+
+export interface OpenAgentManagerRequest {
+  type: "openAgentManager"
+}
+
+export interface OpenAdvancedWorktreeRequest {
+  type: "openAdvancedWorktree"
+}
+
+export interface OpenKiloClawRequest {
+  type: "openKiloClaw"
 }
 
 export interface RequestAgentsMessage {
@@ -191,6 +350,8 @@ export interface SendCommandRequest {
   agent?: string
   variant?: string
   files?: FileAttachment[]
+  agentManagerContext?: string
+  contextDirectory?: string
 }
 
 export interface RemoveSkillMessage {
@@ -199,7 +360,7 @@ export interface RemoveSkillMessage {
 }
 
 export interface RemoveModeMessage {
-  type: "removeMode"
+  type: "removeAgent"
   name: string
 }
 
@@ -222,6 +383,11 @@ export interface DisconnectMcpMessage {
   name: string
 }
 
+export interface AuthenticateMcpMessage {
+  type: "authenticateMcp"
+  name: string
+}
+
 export interface SetLanguageRequest {
   type: "setLanguage"
   locale: string
@@ -238,6 +404,13 @@ export interface QuestionRejectRequest {
   type: "questionReject"
   requestID: string
   sessionID?: string
+}
+
+export interface SessionCostAlertResponseRequest {
+  type: "sessionCostAlertResponse"
+  sessionID: string
+  limit: number
+  response: "continue" | "stop"
 }
 
 export interface SuggestionAcceptRequest {
@@ -264,19 +437,39 @@ export interface RenameSessionRequest {
   title: string
 }
 
-export interface RequestAutocompleteSettingsMessage {
-  type: "requestAutocompleteSettings"
+export interface ExportSessionTranscriptRequest {
+  type: "exportSessionTranscript"
+  sessionID: string
 }
 
-export interface UpdateAutocompleteSettingMessage {
-  type: "updateAutocompleteSetting"
-  key: "enableAutoTrigger" | "enableSmartInlineTaskKeybinding" | "enableChatAutocomplete"
-  value: boolean
+export interface RequestAutocompleteSettingsMessage {
+  type: "requestAutocompleteSettings"
 }
 
 export interface RequestChatCompletionMessage {
   type: "requestChatCompletion"
   text: string
+  requestId: string
+}
+
+export interface SpeechToTextPrewarmMessage {
+  type: "speechToTextPrewarm"
+}
+
+export interface SpeechToTextStartMessage {
+  type: "speechToTextStart"
+  requestId: string
+  model: string
+  language?: string
+}
+
+export interface SpeechToTextStopMessage {
+  type: "speechToTextStop"
+  requestId: string
+}
+
+export interface SpeechToTextCancelMessage {
+  type: "speechToTextCancel"
   requestId: string
 }
 
@@ -287,10 +480,22 @@ export interface RequestFileSearchMessage {
   sessionID?: string
 }
 
+export interface RequestSessionSearchMessage {
+  type: "requestSessionSearch"
+  requestId: string
+  sessionID?: string
+}
+
+export interface RequestFilePickerMessage {
+  type: "requestFilePicker"
+  requestId: string
+}
+
 export interface RequestTerminalContextMessage {
   type: "requestTerminalContext"
   requestId: string
   sessionID?: string
+  agentManagerContext?: string
 }
 
 export interface RequestGitChangesContextMessage {
@@ -314,6 +519,34 @@ export interface RequestTimelineSettingMessage {
   type: "requestTimelineSetting"
 }
 
+export interface RequestThroughputSettingMessage {
+  type: "requestThroughputSetting"
+}
+
+export interface RequestAutoApprovalReasonSettingMessage {
+  type: "requestAutoApprovalReasonSetting"
+}
+
+export interface RequestWorkStyleMessage {
+  type: "requestWorkStyle"
+}
+
+export interface SetWorkStyleMessage {
+  type: "setWorkStyle"
+  style: WorkStyleState
+}
+
+export interface ApplyWorkStyleMessage {
+  type: "applyWorkStyle"
+  style: WorkStyle
+}
+
+export interface StreamSessionVisibleMessage {
+  type: "streamSessionVisible"
+  sessionID: string
+  visible: boolean
+}
+
 export interface RequestBrowserSettingsMessage {
   type: "requestBrowserSettings"
 }
@@ -330,17 +563,73 @@ export interface RequestGlobalConfigMessage {
   type: "requestGlobalConfig"
 }
 
+export interface RequestIndexingStatusMessage {
+  type: "requestIndexingStatus"
+}
+
+export interface RequestIndexingSettingsMessage {
+  type: "requestIndexingSettings"
+  projectId?: string
+}
+
+export interface SetIndexingConsentMessage {
+  type: "setIndexingConsent"
+  projectId: string
+  enabled: boolean
+}
+
+export interface RequestChatSettingsMessage {
+  type: "requestChatSettings"
+}
+
+export interface RequestKiloEmbeddingModelsMessage {
+  type: "requestKiloEmbeddingModels"
+}
+
+export interface RequestImageModelsMessage {
+  type: "requestImageModels"
+}
+
+export interface RequestSpeechToTextModelsMessage {
+  type: "requestSpeechToTextModels"
+}
+
+export interface OpenSettingsTabRequest {
+  type: "openSettingsTab"
+  tab: string
+}
+
 export interface UpdateConfigMessage {
   type: "updateConfig"
+  /** Global config patch written to ~/.config/kilo/kilo.json. */
   config: Partial<Config>
+  globalUnset?: string[][]
+  /** Project config patch written to the workspace's .kilo/kilo.jsonc or existing project config. */
+  projectConfig?: Partial<Config>
+  projectUnset?: string[][]
+  globalBindingId?: string
+  projectBindingId?: string
 }
 
 export interface RequestNotificationSettingsMessage {
   type: "requestNotificationSettings"
 }
 
+export interface TestNotificationMessage {
+  type: "testNotification"
+  sound: string
+}
+
+export interface TestOSNotificationMessage {
+  type: "testOSNotification"
+}
+
 export interface ResetAllSettingsRequest {
   type: "resetAllSettings"
+}
+
+export interface ResetReadNotificationsRequest {
+  type: "resetReadNotifications"
 }
 
 export interface SettingsTabChangedMessage {
@@ -361,6 +650,13 @@ export interface SyncSessionRequest {
   type: "syncSession"
   sessionID: string
   parentSessionID?: string
+  scope?: "task" | "inspector"
+}
+
+export interface UnsyncSessionRequest {
+  type: "unsyncSession"
+  sessionID: string
+  scope?: "task" | "inspector"
 }
 
 // Agent Manager worktree messages
@@ -382,6 +678,7 @@ export interface TelemetryRequest {
 // Create a new worktree (with auto-created first session)
 export interface CreateWorktreeRequest {
   type: "agentManager.createWorktree"
+  projectId?: string
   baseBranch?: string
   branchName?: string
   variant?: string
@@ -390,24 +687,35 @@ export interface CreateWorktreeRequest {
 // Delete a worktree and dissociate its sessions
 export interface DeleteWorktreeRequest {
   type: "agentManager.deleteWorktree"
+  projectId?: string
   worktreeId: string
 }
 
 // Remove a stale worktree entry from state without touching disk
 export interface RemoveStaleWorktreeRequest {
   type: "agentManager.removeStaleWorktree"
+  projectId?: string
   worktreeId: string
 }
 
 // Promote a session: create a worktree and move the session into it
 export interface PromoteSessionRequest {
   type: "agentManager.promoteSession"
+  projectId?: string
   sessionId: string
 }
 
 // Open an unassigned session locally (clear any worktree directory override)
 export interface OpenLocallyRequest {
   type: "agentManager.openLocally"
+  projectId?: string
+  sessionId: string
+}
+
+// Move a worktree-bound session back to the project root and open it in the local tabs
+export interface OpenSessionLocallyRequest {
+  type: "agentManager.openSessionLocally"
+  projectId?: string
   sessionId: string
 }
 
@@ -415,6 +723,7 @@ export interface OpenLocallyRequest {
 export interface AddSessionToWorktreeRequest {
   type: "agentManager.addSessionToWorktree"
   worktreeId: string
+  sessionId?: string
 }
 
 // Fork an existing session (copies conversation history)
@@ -431,7 +740,7 @@ export interface SidebarForkSessionRequest {
   messageId?: string
 }
 
-// Close (remove) a session from its worktree
+// Stop and remove a Local or worktree session from Agent Manager
 export interface CloseSessionRequest {
   type: "agentManager.closeSession"
   sessionId: string
@@ -441,6 +750,7 @@ export interface CloseSessionRequest {
 export interface PersistSessionRequest {
   type: "agentManager.persistSession"
   sessionId: string
+  draftID?: string
 }
 
 /** Remove a non-worktree session from agent-manager.json. */
@@ -452,6 +762,7 @@ export interface ForgetSessionRequest {
 // Rename a worktree's display label
 export interface RenameWorktreeRequest {
   type: "agentManager.renameWorktree"
+  projectId?: string
   worktreeId: string
   label: string
 }
@@ -464,18 +775,70 @@ export interface RequestStateMessage {
   type: "agentManager.requestState"
 }
 
+// Request the current project catalog
+export interface RequestProjectsMessage {
+  type: "agentManager.requestProjects"
+}
+
+// Add a repository as a project via the host folder picker
+export interface AddProjectMessage {
+  type: "agentManager.addProject"
+}
+
+// Remove a project from the catalog (never deletes repository data)
+export interface RemoveProjectMessage {
+  type: "agentManager.removeProject"
+  projectId: string
+}
+
+// Make a project the active context
+export interface SelectProjectMessage {
+  type: "agentManager.selectProject"
+  projectId: string
+}
+
+export type AgentManagerSidebarTarget =
+  | { projectId: string; kind: "local" }
+  | { projectId: string; kind: "worktree"; worktreeId: string }
+  | { projectId: string; kind: "session"; sessionId: string }
+
+export interface ActivateSelectionMessage {
+  type: "agentManager.activateSelection"
+  target: AgentManagerSidebarTarget
+  /** Resolve the project's persisted target instead of using `target` verbatim. */
+  restore?: boolean
+}
+
+// Persist the current selection for seamless restore after switching back
+export interface RememberTargetMessage {
+  type: "agentManager.rememberTarget"
+  projectId: string
+  target: AgentManagerSidebarTarget
+}
+
+// Expand or collapse a project accordion without changing the active project
+export interface SetProjectExpandedMessage {
+  type: "agentManager.setProjectExpanded"
+  projectId: string
+  expanded: boolean
+}
+
 // Configure worktree setup script
 export interface ConfigureSetupScriptRequest {
   type: "agentManager.configureSetupScript"
+  projectId?: string
 }
 
 export interface ConfigureRunScriptRequest {
   type: "agentManager.configureRunScript"
+  projectId?: string
 }
 
 export interface RunScriptRequest {
   type: "agentManager.runScript"
+  projectId?: string
   worktreeId: string
+  destination: TerminalDestination
 }
 
 export interface StopRunScriptRequest {
@@ -494,15 +857,33 @@ export interface ShowLocalTerminalRequest {
   type: "agentManager.showLocalTerminal"
 }
 
+// Show a terminal rooted at a worktree directory (worktree has no session)
+export interface ShowWorktreeTerminalRequest {
+  type: "agentManager.showWorktreeTerminal"
+  worktreeId: string
+}
+
 // Open a worktree directory in VS Code
 export interface OpenWorktreeRequest {
   type: "agentManager.openWorktree"
+  projectId?: string
   worktreeId: string
+}
+
+export interface AgentManagerCopyToClipboardRequest {
+  type: "agentManager.copyToClipboard"
+  text: string
+}
+
+export interface AgentManagerSetIntroDismissedRequest {
+  type: "agentManager.setIntroDismissed"
+  dismissed: boolean
 }
 
 // Copy text to the system clipboard via the extension host
 export interface CopyToClipboardRequest {
-  type: "agentManager.copyToClipboard"
+  type: "copyToClipboard"
+  id: string
   text: string
 }
 
@@ -511,10 +892,15 @@ export interface ShowExistingLocalTerminalRequest {
   type: "agentManager.showExistingLocalTerminal"
 }
 
-// Create a new xterm terminal tab in the given worktree context (null = local)
+// Create a new xterm terminal in the given worktree context (null = workspace root)
 export interface AgentManagerTerminalCreateRequest {
   type: "agentManager.terminal.create"
+  /** Webview-generated logical terminal id, echoed back in created/error. */
+  createId: string
+  placement: TerminalPlacement
   worktreeId: string | null
+  cols?: number
+  rows?: number
 }
 
 // Close a terminal tab
@@ -523,12 +909,30 @@ export interface AgentManagerTerminalCloseRequest {
   terminalId: string
 }
 
+// Deliberately stop a running script terminal (kills its process tree)
+export interface AgentManagerTerminalStopRequest {
+  type: "agentManager.terminal.stop"
+  terminalId: string
+}
+
+export interface AgentManagerTerminalDestinationSelectedRequest {
+  type: "agentManager.terminal.destinationSelected"
+  destination: TerminalDestination
+}
+
 // Notify the extension of an xterm resize so it can update the backend PTY dimensions
 export interface AgentManagerTerminalResizeRequest {
   type: "agentManager.terminal.resize"
   terminalId: string
   cols: number
   rows: number
+}
+
+export interface AgentManagerTerminalRestartRequest {
+  type: "agentManager.terminal.restart"
+  terminalId: string
+  cols?: number
+  rows?: number
 }
 
 // Open a file in the selected worktree for a specific session
@@ -540,9 +944,41 @@ export interface AgentManagerOpenFileRequest {
   column?: number
 }
 
+export interface AgentManagerRequestDocumentMessage {
+  type: "agentManager.requestDocument"
+  sessionId: string
+  file: string
+  contextKey?: string
+}
+
+export interface DocumentRequestMessage {
+  type: "document.request"
+  sessionId?: string
+  file: string
+  contextKey?: string
+}
+
+export interface DocumentOpenFileMessage {
+  type: "document.openFile"
+  file: string
+  line?: number
+  column?: number
+}
+
+export interface DocumentCloseMessage {
+  type: "document.close"
+}
+
+export interface DocumentSendCommentsMessage {
+  type: "document.sendComments"
+  comments: ReviewCommentEntry[]
+  autoSend?: boolean
+}
+
 // Create multiple worktree sessions for the same prompt (multi-version mode)
 export interface CreateMultiVersionRequest {
   type: "agentManager.createMultiVersion"
+  projectId?: string
   text?: string
   name?: string
   versions: number
@@ -557,6 +993,9 @@ export interface CreateMultiVersionRequest {
   // Overrides `versions`, `providerID`, and `modelID`.
   variant?: string
   modelAllocations?: ModelAllocation[]
+  // When set, start each created worktree session with the sandbox override
+  // reconciled to this state. Only sent when sandbox controls are available.
+  sandbox?: boolean
 }
 
 // Persist tab order for a context (worktree ID or "local")
@@ -569,13 +1008,30 @@ export interface SetTabOrderRequest {
 // Persist sidebar worktree order
 export interface SetWorktreeOrderRequest {
   type: "agentManager.setWorktreeOrder"
+  projectId?: string
   order: string[]
 }
 
 // Persist sessions collapsed state
 export interface SetSessionsCollapsedRequest {
   type: "agentManager.setSessionsCollapsed"
+  projectId?: string
   collapsed: boolean
+}
+
+// Persist sidebar collapsed state
+export interface SetSidebarCollapsedRequest {
+  type: "agentManager.setSidebarCollapsed"
+  collapsed: boolean
+}
+
+export interface RequestCaffeinationMessage {
+  type: "agentManager.requestCaffeination"
+}
+
+export interface SetCaffeinationRequest {
+  type: "agentManager.setCaffeination"
+  enabled: boolean
 }
 
 // Persist review diff style preference
@@ -584,70 +1040,109 @@ export interface SetReviewDiffStyleRequest {
   style: "unified" | "split"
 }
 
-export interface RequestBranchesMessage {
-  type: "agentManager.requestBranches"
+// Persist Markdown render preference in diff viewers
+export interface SetReviewMarkdownRenderRequest {
+  type: "agentManager.setReviewMarkdownRender"
+  render: boolean
 }
 
-export interface RequestExternalWorktreesMessage {
-  type: "agentManager.requestExternalWorktrees"
+export interface RequestBranchesMessage {
+  type: "agentManager.requestBranches"
+  projectId?: string
 }
 
 export interface ImportFromBranchRequest {
   type: "agentManager.importFromBranch"
+  projectId?: string
   branch: string
 }
 
 export interface ImportFromPRRequest {
   type: "agentManager.importFromPR"
+  projectId?: string
   url: string
-}
-
-export interface ImportExternalWorktreeRequest {
-  type: "agentManager.importExternalWorktree"
-  path: string
-  branch: string
-}
-
-export interface ImportAllExternalWorktreesRequest {
-  type: "agentManager.importAllExternalWorktrees"
 }
 
 // Agent Manager: Request one-shot diff fetch (webview → extension)
 export interface RequestWorktreeDiffMessage {
   type: "agentManager.requestWorktreeDiff"
+  projectId?: string
   sessionId: string
+  scope?: string
 }
 
 export interface RequestWorktreeDiffFileMessage {
   type: "agentManager.requestWorktreeDiffFile"
+  projectId?: string
   sessionId: string
   file: string
+  scope?: string
 }
 
 // Agent Manager: Start polling for live diff updates (webview → extension)
 export interface StartDiffWatchMessage {
   type: "agentManager.startDiffWatch"
+  projectId?: string
   sessionId: string
+  scope?: string
 }
 
 // Agent Manager: Stop polling for diff updates (webview → extension)
 export interface StopDiffWatchMessage {
   type: "agentManager.stopDiffWatch"
+  projectId?: string
+}
+
+// Agent Manager: Request branch picker data for a diff context (webview → extension)
+export interface RequestDiffBranchesMessage {
+  type: "agentManager.requestDiffBranches"
+  projectId?: string
+  sessionId: string
+  scope?: string
+}
+
+// Agent Manager: Set or clear the base branch override for a diff context (webview → extension)
+export interface SetDiffBaseBranchMessage {
+  type: "agentManager.setDiffBaseBranch"
+  projectId?: string
+  sessionId: string
+  scope?: string
+  branch?: string
 }
 
 // Agent Manager: PR messages (webview → extension)
 export interface RefreshPRMessage {
   type: "agentManager.refreshPR"
+  projectId?: string
   worktreeId: string
 }
 
 export interface OpenPRMessage {
   type: "agentManager.openPR"
+  projectId?: string
   worktreeId: string
+  url?: string
+}
+
+export interface CommentActionMessage {
+  type: "agentManager.resolveComment" | "agentManager.unresolveComment"
+  projectId?: string
+  worktreeId: string
+  threadId: string
+}
+
+export interface CommentReactionMessage {
+  type: "agentManager.commentReaction"
+  projectId?: string
+  worktreeId: string
+  commentId: string
+  reaction: PRReactionContent
+  add: boolean
 }
 
 export interface ApplyWorktreeDiffMessage {
   type: "agentManager.applyWorktreeDiff"
+  projectId?: string
   worktreeId: string
   selectedFiles?: string[]
 }
@@ -657,6 +1152,7 @@ export interface RevertWorktreeFileMessage {
   type: "agentManager.revertWorktreeFile"
   sessionId: string
   file: string
+  scope?: string
 }
 
 // Variant persistence (webview → extension)
@@ -681,16 +1177,82 @@ export interface EnhancePromptRequest {
 // Open the standalone changes viewer tab from the sidebar
 export interface OpenChangesRequest {
   type: "openChanges"
+  /**
+   * When set, opens the viewer scoped to a single turn (identified by the
+   * user message ID). The source picker is hidden and polling is disabled
+   * for this mode.
+   */
+  turnId?: string
 }
 
 // Open diff virtual (permission diff) in the lightweight diff virtual panel
 export interface OpenDiffVirtualRequest {
   type: "openDiffVirtual"
   diff: PermissionFileDiff
+  initialDiffStyle: "unified" | "split"
+}
+
+export interface OpenPRCommentRequest {
+  type: "openPRComment"
+  comment: PRReviewCommentData
+  content: string
+  sessionID?: string
+}
+
+export interface DiffViewerSendCommentsRequest {
+  type: "diffViewer.sendComments"
+  comments: ReviewCommentEntry[]
+  autoSend: boolean
+}
+
+export interface DiffViewerSetDiffStyleRequest {
+  type: "diffViewer.setDiffStyle"
+  style: "unified" | "split"
+}
+
+export interface DiffViewerSetMarkdownRenderRequest {
+  type: "diffViewer.setMarkdownRender"
+  render: boolean
+}
+
+export interface DiffViewerRevertFileRequest {
+  type: "diffViewer.revertFile"
+  file: string
+}
+
+export interface DiffViewerRequestFileRequest {
+  type: "diffViewer.requestFile"
+  file: string
+}
+
+export interface DiffViewerCloseRequest {
+  type: "diffViewer.close"
+}
+
+export interface DiffViewerRequestBranchesRequest {
+  type: "diffViewer.requestBranches"
+}
+
+/**
+ * Override the workspace source's base branch. Pass `branch: undefined` to
+ * clear the override and fall back to the auto-resolved base.
+ */
+export interface DiffViewerSetBaseBranchRequest {
+  type: "diffViewer.setBaseBranch"
+  branch: string | undefined
+}
+
+export interface DiffVirtualSetMarkdownRenderRequest {
+  type: "diffVirtual.setMarkdownRender"
+  render: boolean
 }
 
 export interface RetryConnectionRequest {
   type: "retryConnection"
+}
+
+export interface ReloadRequest {
+  type: "reload"
 }
 
 // Open a sub-agent session in a read-only editor panel
@@ -698,6 +1260,7 @@ export interface OpenSubAgentViewerRequest {
   type: "openSubAgentViewer"
   sessionID: string
   title?: string
+  parentSessionID?: string
 }
 
 // Preview an image attachment in VS Code's built-in image viewer
@@ -707,9 +1270,16 @@ export interface PreviewImageRequest {
   filename: string
 }
 
+export interface SaveImageRequest {
+  type: "saveImage"
+  dataUrl: string
+  filename: string
+}
+
 // Set default base branch (webview → extension)
 export interface SetDefaultBaseBranchRequest {
   type: "agentManager.setDefaultBaseBranch"
+  projectId?: string
   branch?: string
 }
 
@@ -719,8 +1289,81 @@ export interface AgentManagerOpenSessionsMessage {
   sessionIDs: string[]
 }
 
+// Report open local sidebar/editor-tab session IDs without creating new provider connections.
+export interface SidebarOpenSessionsMessage {
+  type: "sidebar.openSessions"
+  sessionIDs: string[]
+}
+
+export interface AgentManagerVisibleSessionMessage {
+  type: "agentManager.visibleSession"
+  sessionID: string | null
+}
+
+export interface AgentManagerBrowserRequestMessage {
+  type:
+    | "agentManager.browser.open"
+    | "agentManager.browser.refresh"
+    | "agentManager.browser.close"
+    | "agentManager.browser.state"
+    | "agentManager.browser.inspect"
+    | "agentManager.browser.input"
+    | "agentManager.browser.devtools"
+  sessionId: string
+  projectId?: string
+  url?: string
+  requestId?: string
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  hover?: boolean
+  click?: boolean
+  theme?: "dark" | "light"
+}
+
+export interface RequestAutoApproveStateMessage {
+  type: "requestAutoApproveState"
+}
+
+export interface ToggleAutoApproveMessage {
+  type: "toggleAutoApprove"
+}
+
+export interface RequestSandboxStatusMessage {
+  type: "requestSandboxStatus"
+  sessionID: string
+}
+
+export interface RequestSandboxDefaultMessage {
+  type: "requestSandboxDefault"
+  requestID?: string
+  agentManagerContext?: string
+  contextDirectory?: string
+}
+
+export interface SetSandboxDefaultMessage {
+  type: "setSandboxDefault"
+  enabled: boolean
+  requestID: string
+  agentManagerContext?: string
+  contextDirectory?: string
+}
+
+export interface ToggleSandboxMessage {
+  type: "toggleSandbox"
+  sessionID: string
+  requestID: string
+  agentManagerContext?: string
+  contextDirectory?: string
+}
+
 export interface ToggleRemoteMessage {
   type: "toggleRemote"
+}
+
+export interface ToggleCaffeinationMessage {
+  type: "toggleCaffeination"
 }
 
 export interface SetRemoteEnabledMessage {
@@ -737,6 +1380,7 @@ export interface ConnectProviderMessage {
   requestId: string
   providerID: string
   apiKey: string
+  metadata?: Record<string, string>
 }
 
 export interface AuthorizeProviderOAuthMessage {
@@ -774,6 +1418,13 @@ export interface FetchCustomProviderModelsMessage {
   requestId: string
   baseURL: string
   apiKey?: string
+  /**
+   * When editing an existing provider and the key field is untouched, the
+   * webview has no key to send (keys are stripped before they reach it).
+   * It sends the providerID instead so the extension can authenticate the
+   * fetch with the stored key — which never crosses into the webview.
+   */
+  providerID?: string
   headers?: Record<string, string>
 }
 
@@ -784,6 +1435,25 @@ export interface PersistRecentsRequest {
 
 export interface RequestRecentsMessage {
   type: "requestRecents"
+}
+
+export interface RecordModelUsageMessage {
+  type: "recordModelUsage"
+  providerID: string
+  modelID: string
+}
+
+export interface RequestModelUsageMessage {
+  type: "requestModelUsage"
+}
+
+export interface PersistModelSelectorExpandedRequest {
+  type: "persistModelSelectorExpanded"
+  value: boolean
+}
+
+export interface RequestModelSelectorExpandedMessage {
+  type: "requestModelSelectorExpanded"
 }
 
 export interface ToggleFavoriteRequest {
@@ -805,11 +1475,6 @@ export interface PersistModelSelectionRequest {
   modelID: string
 }
 
-export interface ClearModelSelectionRequest {
-  type: "clearModelSelection"
-  agent: string
-}
-
 export interface RequestModelSelectionsMessage {
   type: "requestModelSelections"
 }
@@ -823,6 +1488,7 @@ export interface ContinueInWorktreeRequest {
 // Section CRUD messages (webview → extension)
 export interface CreateSectionRequest {
   type: "agentManager.createSection"
+  projectId?: string
   name: string
   color?: string
   worktreeIds?: string[]
@@ -830,34 +1496,40 @@ export interface CreateSectionRequest {
 
 export interface RenameSectionRequest {
   type: "agentManager.renameSection"
+  projectId?: string
   sectionId: string
   name: string
 }
 
 export interface DeleteSectionRequest {
   type: "agentManager.deleteSection"
+  projectId?: string
   sectionId: string
 }
 
 export interface SetSectionColorRequest {
   type: "agentManager.setSectionColor"
+  projectId?: string
   sectionId: string
   color: string | null
 }
 
 export interface ToggleSectionCollapsedRequest {
   type: "agentManager.toggleSectionCollapsed"
+  projectId?: string
   sectionId: string
 }
 
 export interface MoveToSectionRequest {
   type: "agentManager.moveToSection"
+  projectId?: string
   worktreeIds: string[]
   sectionId: string | null
 }
 
 export interface MoveSectionRequest {
   type: "agentManager.moveSection"
+  projectId?: string
   sectionId: string
   dir: -1 | 1
 }
@@ -883,29 +1555,64 @@ export interface RemoveInstalledMarketplaceItemMessage {
   mpInstallOptions: InstallMarketplaceItemOptions
 }
 
+export interface DismissAgentMigrationBannerMessage {
+  type: "dismissAgentMigrationBanner"
+}
+
 export type WebviewMessage =
+  | import("./agent-manager").BaseUpdateRequest
+  | PRMergeRequest
+  | { type: "sessionActivity"; state: Activity }
+  | { type: "acknowledgeSession"; sessionID: string; eventID: string }
+  | DocumentRequestMessage
+  | DocumentOpenFileMessage
+  | DocumentCloseMessage
+  | DocumentSendCommentsMessage
   | SendMessageRequest
+  | ResumeSessionRequest
   | AbortRequest
+  | RequestBackgroundJobsMessage
+  | RequestSessionBoardMessage
+  | ResetSessionBoardMessage
+  | CancelBackgroundJobMessage
+  | PromoteBackgroundJobMessage
   | RevertSessionRequest
   | UnrevertSessionRequest
+  | DeleteMessageRequest
   | PermissionResponseRequest
   | CreateSessionRequest
   | ClearSessionRequest
   | LoadMessagesRequest
   | LoadSessionsRequest
+  | RequestSessionModelUsageMessage
   | RequestCloudSessionsMessage
   | RequestGitRemoteUrlMessage
   | LoginRequest
   | LogoutRequest
   | RefreshProfileRequest
+  | RequestProviderUsageMessage
+  | RefreshProviderUsageMessage
   | OpenExternalRequest
   | OpenSettingsPanelRequest
+  | RequestAgentManagerSettingsMessage
+  | RequestAgentManagerSettingsBranchesMessage
+  | SetAgentManagerDefaultBaseBranchMessage
+  | ConfigureAgentManagerSetupScriptMessage
+  | OpenProfilePanelRequest
   | OpenVSCodeSettingsRequest
+  | OpenConfigFileRequest
   | OpenMarketplacePanelRequest
+  | OpenAgentManagerRequest
+  | OpenAdvancedWorktreeRequest
+  | OpenKiloClawRequest
   | OpenFileRequest
+  | ValidateFilesRequest
   | CancelLoginRequest
   | SetOrganizationRequest
   | WebviewReadyRequest
+  | WebviewFocusChangedRequest
+  | AgentManagerFocusChangedRequest
+  | SelectSourceRequest
   | RequestProvidersMessage
   | CompactRequest
   | RequestAgentsMessage
@@ -918,31 +1625,55 @@ export type WebviewMessage =
   | RequestMcpStatusMessage
   | ConnectMcpMessage
   | DisconnectMcpMessage
+  | AuthenticateMcpMessage
   | SetLanguageRequest
   | QuestionReplyRequest
   | QuestionRejectRequest
+  | SessionCostAlertResponseRequest
   | SuggestionAcceptRequest
   | SuggestionDismissRequest
   | DeleteSessionRequest
   | RenameSessionRequest
+  | ExportSessionTranscriptRequest
   | RequestAutocompleteSettingsMessage
-  | UpdateAutocompleteSettingMessage
   | RequestChatCompletionMessage
+  | SpeechToTextPrewarmMessage
+  | SpeechToTextStartMessage
+  | SpeechToTextStopMessage
+  | SpeechToTextCancelMessage
   | RequestFileSearchMessage
+  | RequestSessionSearchMessage
+  | RequestFilePickerMessage
   | RequestTerminalContextMessage
   | RequestGitChangesContextMessage
   | ChatCompletionAcceptedMessage
   | UpdateSettingRequest
   | RequestTimelineSettingMessage
+  | RequestThroughputSettingMessage
+  | RequestAutoApprovalReasonSettingMessage
+  | RequestWorkStyleMessage
+  | SetWorkStyleMessage
+  | ApplyWorkStyleMessage
+  | StreamSessionVisibleMessage
   | RequestBrowserSettingsMessage
   | RequestClaudeCompatSettingMessage
   | RequestConfigMessage
   | RequestGlobalConfigMessage
+  | RequestIndexingStatusMessage
+  | RequestIndexingSettingsMessage
+  | SetIndexingConsentMessage
+  | RequestChatSettingsMessage
+  | RequestKiloEmbeddingModelsMessage
   | UpdateConfigMessage
+  | OpenSettingsTabRequest
   | RequestNotificationSettingsMessage
+  | TestNotificationMessage
+  | TestOSNotificationMessage
   | ResetAllSettingsRequest
+  | ResetReadNotificationsRequest
   | SettingsTabChangedMessage
   | SyncSessionRequest
+  | UnsyncSessionRequest
   | CreateWorktreeSessionRequest
   | RequestNotificationsMessage
   | DismissNotificationMessage
@@ -951,6 +1682,7 @@ export type WebviewMessage =
   | RemoveStaleWorktreeRequest
   | PromoteSessionRequest
   | OpenLocallyRequest
+  | OpenSessionLocallyRequest
   | AddSessionToWorktreeRequest
   | ForkSessionRequest
   | SidebarForkSessionRequest
@@ -961,75 +1693,116 @@ export type WebviewMessage =
   | TelemetryRequest
   | RequestRepoInfoMessage
   | RequestStateMessage
+  | RequestProjectsMessage
+  | AddProjectMessage
+  | RemoveProjectMessage
+  | SelectProjectMessage
+  | ActivateSelectionMessage
+  | RememberTargetMessage
+  | SetProjectExpandedMessage
   | ConfigureSetupScriptRequest
   | ConfigureRunScriptRequest
   | RunScriptRequest
   | StopRunScriptRequest
   | ShowTerminalRequest
   | ShowLocalTerminalRequest
+  | ShowWorktreeTerminalRequest
   | OpenWorktreeRequest
+  | AgentManagerCopyToClipboardRequest
+  | AgentManagerSetIntroDismissedRequest
   | CopyToClipboardRequest
   | ShowExistingLocalTerminalRequest
   | AgentManagerOpenFileRequest
+  | AgentManagerRequestDocumentMessage
   | CreateMultiVersionRequest
   | SetTabOrderRequest
   | SetWorktreeOrderRequest
   | SetSessionsCollapsedRequest
+  | SetSidebarCollapsedRequest
+  | RequestCaffeinationMessage
+  | SetCaffeinationRequest
   | SetReviewDiffStyleRequest
+  | SetReviewMarkdownRenderRequest
   | PersistVariantRequest
   | RequestVariantsMessage
   | RequestCloudSessionDataMessage
   | ImportAndSendMessage
   | RequestBranchesMessage
-  | RequestExternalWorktreesMessage
   | ImportFromBranchRequest
   | ImportFromPRRequest
-  | ImportExternalWorktreeRequest
-  | ImportAllExternalWorktreesRequest
   | RequestWorktreeDiffMessage
   | RequestWorktreeDiffFileMessage
   | StartDiffWatchMessage
   | StopDiffWatchMessage
+  | RequestDiffBranchesMessage
+  | SetDiffBaseBranchMessage
   | RefreshPRMessage
   | OpenPRMessage
-  // legacy-migration start
-  | RequestLegacyMigrationDataMessage
-  | StartLegacyMigrationMessage
-  | SkipLegacyMigrationMessage
-  | ClearLegacyDataMessage
-  | FinalizeLegacyMigrationMessage
-  // legacy-migration end
+  | CommentActionMessage
+  | CommentReactionMessage
+  | RequestMigrationDataMessage
+  | StartMigrationMessage
   | ApplyWorktreeDiffMessage
   | RevertWorktreeFileMessage
   | EnhancePromptRequest
   | OpenChangesRequest
   | OpenDiffVirtualRequest
+  | OpenPRCommentRequest
+  | DiffViewerSendCommentsRequest
+  | DiffViewerSetDiffStyleRequest
+  | DiffViewerSetMarkdownRenderRequest
+  | DiffViewerRevertFileRequest
+  | DiffViewerRequestFileRequest
+  | DiffViewerCloseRequest
+  | DiffViewerRequestBranchesRequest
+  | DiffViewerSetBaseBranchRequest
+  | DiffVirtualSetMarkdownRenderRequest
   | RetryConnectionRequest
+  | ReloadRequest
   | OpenSubAgentViewerRequest
   | PreviewImageRequest
+  | SaveImageRequest
   | SetDefaultBaseBranchRequest
   | AgentManagerOpenSessionsMessage
+  | SidebarOpenSessionsMessage
+  | AgentManagerVisibleSessionMessage
+  | AgentManagerBrowserRequestMessage
+  | RequestAutoApproveStateMessage
+  | ToggleAutoApproveMessage
+  | RequestSandboxStatusMessage
+  | RequestSandboxDefaultMessage
+  | SetSandboxDefaultMessage
+  | ToggleSandboxMessage
   | FetchMarketplaceDataMessage
   | FilterMarketplaceItemsMessage
   | InstallMarketplaceItemMessage
   | RemoveInstalledMarketplaceItemMessage
+  | DismissAgentMigrationBannerMessage
   | ConnectProviderMessage
   | AuthorizeProviderOAuthMessage
   | CompleteProviderOAuthMessage
   | DisconnectProviderMessage
+  | AnacondaDesktopWebviewMessage
   | SaveCustomProviderMessage
   | FetchCustomProviderModelsMessage
   | PersistRecentsRequest
   | RequestRecentsMessage
+  | RecordModelUsageMessage
+  | RequestModelUsageMessage
+  | PersistModelSelectorExpandedRequest
+  | RequestModelSelectorExpandedMessage
   | ToggleFavoriteRequest
   | RequestFavoritesMessage
   | PersistModelSelectionRequest
-  | ClearModelSelectionRequest
   | RequestModelSelectionsMessage
   | ToggleRemoteMessage
+  | ToggleCaffeinationMessage
   | SetRemoteEnabledMessage
   | RequestRemoteStatusMessage
   | ContinueInWorktreeRequest
+  | RequestMemoryMessage
+  | MemoryShowMessage
+  | MemoryOperationMessage
   | CreateSectionRequest
   | RenameSectionRequest
   | DeleteSectionRequest
@@ -1037,9 +1810,15 @@ export type WebviewMessage =
   | ToggleSectionCollapsedRequest
   | MoveToSectionRequest
   | MoveSectionRequest
+  | OpenContentRequest
   | AgentManagerTerminalCreateRequest
   | AgentManagerTerminalCloseRequest
+  | AgentManagerTerminalStopRequest
+  | AgentManagerTerminalRestartRequest
+  | AgentManagerTerminalDestinationSelectedRequest
   | AgentManagerTerminalResizeRequest
+  | RequestImageModelsMessage
+  | RequestSpeechToTextModelsMessage
 
 // ============================================
 // VS Code API type

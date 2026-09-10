@@ -5,7 +5,13 @@ description: "Run tasks on a schedule using cron expressions"
 
 # Scheduled Triggers
 
+{% partial file="kiloclaw-eol.md" /%}
+
 Scheduled triggers let your KiloClaw agent run tasks automatically on a recurring schedule. Instead of waiting for an external event, a scheduled trigger fires at the times you define using cron expressions. When it fires, the prompt template is rendered and delivered as a chat message to your KiloClaw instance, just like a webhook.
+
+Scheduled triggers are one trigger mode shared by KiloClaw and Cloud Agent. In
+KiloClaw, the rendered prompt is delivered to the KiloClaw instance on this page;
+in Cloud Agent, the same trigger concept starts a Cloud Agent repository session.
 
 ## Setup
 
@@ -47,12 +53,12 @@ Cron expressions use the standard five-field format:
 
 **Examples:**
 
-| Expression     | Meaning                             |
-| -------------- | ----------------------------------- |
-| `*/15 * * * *` | Every 15 minutes                    |
-| `0 9 * * 1-5`  | 9:00 AM on weekdays                 |
-| `0 0 1 * *`    | Midnight on the first of each month |
-| `30 14 * * 3`  | 2:30 PM every Wednesday             |
+| Expression | Meaning |
+|---|---|
+| `*/15 * * * *` | Every 15 minutes |
+| `0 9 * * 1-5` | 9:00 AM on weekdays |
+| `0 0 1 * *` | Midnight on the first of each month |
+| `30 14 * * 3` | 2:30 PM every Wednesday |
 
 {% callout type="note" title="Minimum interval" %}
 The minimum interval between scheduled trigger runs is 10 minutes. Schedules more frequent than that are rejected.
@@ -74,10 +80,10 @@ Run your scheduled task. Triggered at {{scheduledTime}}.
 
 **Available variables:**
 
-| Variable            | Description                              |
-| ------------------- | ---------------------------------------- |
+| Variable | Description |
+|---|---|
 | `{{scheduledTime}}` | The time the schedule fired (ISO string) |
-| `{{timestamp}}`     | Capture timestamp (ISO string)           |
+| `{{timestamp}}` | Capture timestamp (ISO string) |
 
 {% callout type="note" title="Webhook variables are not available" %}
 Since scheduled triggers do not receive an HTTP request, variables like `{{body}}`, `{{bodyJson}}`, `{{headers}}`, `{{method}}`, `{{path}}`, and `{{query}}` are not populated. Use `{{scheduledTime}}` and `{{timestamp}}` instead.

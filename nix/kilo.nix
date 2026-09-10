@@ -3,10 +3,12 @@
   stdenvNoCC,
   callPackage,
   bun,
+  bubblewrap,
   nodejs,
   sysctl,
   makeBinaryWrapper,
   models-dev,
+  ripgrep,
   installShellFiles,
   versionCheckHook,
   writableTmpDirAsHomeHook,
@@ -38,6 +40,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
   env.MODELS_DEV_API_JSON = "${models-dev}/dist/_api.json";
   env.KILO_DISABLE_MODELS_FETCH = true;
+  env.KILO_SKIP_BUNDLED_BWRAP = "1";
   env.KILO_VERSION = finalAttrs.version;
   env.KILO_CHANNEL = "local";
 
@@ -51,25 +54,26 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook postBuild
   '';
 
-  installPhase =
-    ''
-      runHook preInstall
+  installPhase = ''
+    runHook preInstall
 
-      install -Dm755 dist/@kilocode/cli-*/bin/kilo $out/bin/kilo
-      install -Dm644 schema.json $out/share/kilo/schema.json
-    ''
-    # bun runs sysctl to detect if dunning on rosetta2
-    + lib.optionalString stdenvNoCC.hostPlatform.isDarwin ''
-      wrapProgram $out/bin/kilo \
-        --prefix PATH : ${
-          lib.makeBinPath [
-            sysctl
+    install -Dm755 dist/@kilocode/cli-*/bin/kilo $out/bin/kilo
+    install -Dm644 schema.json $out/share/kilo/schema.json
+
+    wrapProgram $out/bin/kilo \
+      ${lib.optionalString stdenvNoCC.hostPlatform.isLinux "--set KILO_BWRAP_PATH ${bubblewrap}/bin/bwrap"} \
+      --prefix PATH : ${
+        lib.makeBinPath (
+          [
+            ripgrep
           ]
-        }
-    ''
-    + ''
-      runHook postInstall
-    '';
+          # bun runs sysctl to detect if running on rosetta2
+          ++ lib.optional stdenvNoCC.hostPlatform.isDarwin sysctl
+        )
+      }
+
+    runHook postInstall
+  '';
 
   postInstall = lib.optionalString (stdenvNoCC.buildPlatform.canExecute stdenvNoCC.hostPlatform) ''
     # trick yargs into also generating zsh completions
@@ -96,7 +100,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   meta = {
     description = "AI-powered development tool";
     homepage = "https://kilo.ai/";
-    license = lib.licenses.mit;
+    license = [ lib.licenses.mit ] ++ lib.optional stdenvNoCC.hostPlatform.isLinux lib.licenses.lgpl2Plus;
     mainProgram = "kilo";
     inherit (node_modules.meta) platforms;
   };

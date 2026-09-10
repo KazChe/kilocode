@@ -7,6 +7,9 @@ import ai.kilocode.log.KiloLog
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharedFlow
+import okhttp3.OkHttpClient
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -28,6 +31,8 @@ class KiloBackendWorkspaceManager(
     private val workspaces = ConcurrentHashMap<String, KiloBackendWorkspace>()
 
     private var api: DefaultApi? = null
+    private var http: OkHttpClient? = null
+    private var port = 0
     private var events: SharedFlow<SseEvent>? = null
 
     /**
@@ -35,9 +40,11 @@ class KiloBackendWorkspaceManager(
      * Called by [KiloBackendAppService] after [KiloAppState.Ready].
      * Clears any stale workspaces from a previous connection.
      */
-    fun start(api: DefaultApi, events: SharedFlow<SseEvent>) {
+    fun start(api: DefaultApi, http: OkHttpClient, port: Int, events: SharedFlow<SseEvent>) {
         stop()
         this.api = api
+        this.http = http
+        this.port = port
         this.events = events
         log.info("Workspace manager started")
     }
@@ -49,6 +56,8 @@ class KiloBackendWorkspaceManager(
         workspaces.values.forEach { it.stop() }
         workspaces.clear()
         api = null
+        http = null
+        port = 0
         events = null
         log.info("Workspace manager stopped")
     }
@@ -59,15 +68,34 @@ class KiloBackendWorkspaceManager(
      */
     fun get(dir: String): KiloBackendWorkspace {
         val client = api ?: throw IllegalStateException("Workspace manager not started")
+        val http = http ?: throw IllegalStateException("Workspace manager not started")
         val ev = events!!
         return workspaces.computeIfAbsent(dir) { d ->
             log.info("Creating workspace for $d")
-            KiloBackendWorkspace(d, cs, client, ev, sessions, log).also { it.load() }
+            KiloBackendWorkspace(d, cs, client, http, port, ev, sessions, log).also { it.load() }
         }
     }
 
-    /** Remove a workspace (e.g. when a worktree is deleted). */
+    /**
+     * Remove any cached workspace whose directory resolves to the same real path as [dir].
+     * Callers pass git porcelain paths, while workspaces are often keyed by the resolved
+     * (`toRealPath`) path or the IDE base path, so an exact-string match would miss the entry
+     * and leave a deleted worktree cached as Ready — still producing backend errors.
+     */
     fun remove(dir: String) {
-        workspaces.remove(dir)?.stop()
+        val target = canonical(dir)
+        workspaces.keys.filter { canonical(it) == target }.forEach { key ->
+            log.info("Removing cached workspace for $key")
+            workspaces.remove(key)?.stop()
+        }
+    }
+
+    /** Resolve symlinks on the parent so `/var/...` and `/private/var/...` compare equal even after the leaf is deleted. */
+    private fun canonical(dir: String): String {
+        val path = Path.of(dir).normalize()
+        val parent = path.parent ?: return path.toString()
+        val name = path.fileName ?: return path.toString()
+        val root = runCatching { if (Files.exists(parent)) parent.toRealPath() else parent }.getOrDefault(parent)
+        return root.resolve(name).toString()
     }
 }

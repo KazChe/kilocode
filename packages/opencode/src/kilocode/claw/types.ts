@@ -1,30 +1,38 @@
-// kilocode_change - new file
-
-/**
- * KiloClaw TUI types
- *
- * Types for the KiloClaw chat and dashboard feature in the TUI.
- */
-
-export type ClawStatus = {
-  status: "provisioned" | "starting" | "restarting" | "running" | "stopped" | "destroying" | null
-  sandboxId?: string
-  flyRegion?: string
-  machineSize?: { cpus: number; memory_mb: number }
-  openclawVersion?: string | null
-  lastStartedAt?: string | null
-  lastStoppedAt?: string | null
-  channelCount?: number
-  secretCount?: number
-  userId?: string
-}
-
-export type ChatCredentials = {
-  apiKey: string
-  userId: string
-  userToken: string
-  channelId: string
-}
+export type {
+  ActionDeliveryFailedEvent,
+  ActionExecutedEvent,
+  ActionItem,
+  ActionsBlock,
+  BotStatusEvent,
+  BotStatusRecord,
+  ChatToken,
+  ClawStatus,
+  ContentBlock,
+  ConversationActivityEvent,
+  ConversationCreatedEvent,
+  ConversationLeftEvent,
+  ConversationListItem,
+  ConversationReadEvent,
+  ConversationRenamedEvent,
+  ConversationStatusEvent,
+  ConversationStatusRecord,
+  ExecApprovalDecision,
+  KiloChatEventMap,
+  KiloChatEventName,
+  Message,
+  MessageCreatedEvent,
+  MessageDeletedEvent,
+  MessageDeliveryFailedEvent,
+  MessageUpdatedEvent,
+  ReactionAddedEvent,
+  ReactionRemovedEvent,
+  ReactionSummary,
+  ReplyToSnapshot,
+  TextBlock,
+  TypingEvent,
+  TypingMember,
+  TypingStopEvent,
+} from "@kilocode/kilo-gateway/claw"
 
 export type ChatMessage = {
   id: string

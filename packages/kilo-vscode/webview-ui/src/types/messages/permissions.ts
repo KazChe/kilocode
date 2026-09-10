@@ -1,7 +1,7 @@
 export type PermissionLevel = "allow" | "ask" | "deny"
 
 /** null in a PermissionRule object is a delete sentinel — removes the key from the config */
-export type PermissionRule = PermissionLevel | Record<string, PermissionLevel | null>
+export type PermissionRule = PermissionLevel | null | Record<string, PermissionLevel | null>
 
 export type PermissionConfig = Partial<Record<string, PermissionRule>>
 
@@ -16,10 +16,20 @@ export interface PermissionRuleItem {
 export interface PermissionFileDiff {
   file: string
   patch?: string
-  before?: string
-  after?: string
   additions: number
   deletions: number
+  status?: "added" | "deleted" | "modified"
+  files?: PermissionFileDiff[]
+}
+
+export interface PermissionPatchFile {
+  filePath?: string
+  relativePath?: string
+  type?: "add" | "update" | "delete" | "move"
+  patch?: string
+  additions?: number
+  deletions?: number
+  movePath?: string
 }
 
 export interface PermissionRequest {
@@ -33,6 +43,12 @@ export interface PermissionRequest {
     diff?: string
     filepath?: string
     filediff?: PermissionFileDiff
+    files?: PermissionPatchFile[]
+    description?: string
+    heredoc?: boolean
+    skillShell?: boolean
+    commands?: string[]
+    skill?: string
   }
   message?: string
   tool?: { messageID: string; callID: string }

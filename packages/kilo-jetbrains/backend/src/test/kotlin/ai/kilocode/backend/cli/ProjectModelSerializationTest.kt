@@ -23,7 +23,7 @@ class ProjectModelSerializationTest {
 
     @Test
     fun `empty provider list`() {
-        val src = """{"all":[],"default":{},"connected":[]}"""
+        val src = """{"all":[],"default":{},"connected":[],"failed":[]}"""
         val obj = json.decodeFromString<ProviderList200Response>(src)
         assertTrue(obj.all.isEmpty())
         assertTrue(obj.default.isEmpty())
@@ -52,7 +52,7 @@ class ProjectModelSerializationTest {
                             "toolcall": true,
                             "input": {"text": true, "audio": false, "image": false, "video": false, "pdf": false},
                             "output": {"text": true, "audio": false, "image": false, "video": false, "pdf": false},
-                            "interleaved": false
+                            "interleaved": {"field":"reasoning_content"}
                         },
                         "cost": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
                         "limit": {"context": 200000, "output": 16000},
@@ -64,7 +64,8 @@ class ProjectModelSerializationTest {
                 }
             }],
             "default": {"code": "anthropic/claude-4"},
-            "connected": ["anthropic"]
+            "connected": ["anthropic"],
+            "failed": []
         }"""
         val obj = json.decodeFromString<ProviderList200Response>(src)
         assertEquals(1, obj.all.size)
@@ -102,7 +103,7 @@ class ProjectModelSerializationTest {
                             "toolcall": false,
                             "input": {"text": true, "audio": false, "image": false, "video": false, "pdf": false},
                             "output": {"text": true, "audio": false, "image": false, "video": false, "pdf": false},
-                            "interleaved": false
+                            "interleaved": {"field":"reasoning_content"}
                         },
                         "cost": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
                         "limit": {"context": 8000, "output": 4000},
@@ -110,16 +111,19 @@ class ProjectModelSerializationTest {
                         "options": {},
                         "headers": {},
                         "release_date": "2025-01-01",
-                        "isFree": true
+                        "isFree": true,
+                        "hasUserByokAvailable": true
                     }
                 }
             }],
             "default": {},
-            "connected": []
+            "connected": [],
+            "failed": []
         }"""
         val obj = json.decodeFromString<ProviderList200Response>(src)
         val model = obj.all[0].models["free-model"]!!
         assertEquals(true, model.isFree)
+        assertEquals(true, model.hasUserByokAvailable)
         assertEquals(
             ai.kilocode.jetbrains.api.model.Model.Status.BETA,
             model.status,
@@ -132,10 +136,18 @@ class ProjectModelSerializationTest {
             "all": [],
             "default": {},
             "connected": [],
+            "failed": [],
             "future_field": "value"
         }"""
         val obj = json.decodeFromString<ProviderList200Response>(src)
         assertTrue(obj.all.isEmpty())
+    }
+
+    @Test
+    fun `provider list defaults omitted failed field`() {
+        val src = """{"all":[],"default":{},"connected":[]}"""
+        val obj = json.decodeFromString<ProviderList200Response>(src)
+        assertTrue(obj.failed.isEmpty())
     }
 
     // ------ Agent ------
@@ -171,7 +183,7 @@ class ProjectModelSerializationTest {
         assertEquals(true, obj.native)
         assertEquals(false, obj.hidden)
         assertEquals("#FF5733", obj.color)
-        assertEquals(5, obj.steps)
+        assertEquals(5.0, obj.steps)
     }
 
     @Test
@@ -269,5 +281,19 @@ class ProjectModelSerializationTest {
     fun `empty skill list`() {
         val list = json.decodeFromString<List<AppSkills200ResponseInner>>("[]")
         assertTrue(list.isEmpty())
+    }
+
+    // ------ ProviderList200Response.failed non-empty ------
+
+    @Test
+    fun `provider list failed field handles non-empty list`() {
+        val src = """{
+            "all": [],
+            "default": {},
+            "connected": [],
+            "failed": ["openai", "gemini"]
+        }"""
+        val obj = json.decodeFromString<ProviderList200Response>(src)
+        assertEquals(listOf("openai", "gemini"), obj.failed)
     }
 }

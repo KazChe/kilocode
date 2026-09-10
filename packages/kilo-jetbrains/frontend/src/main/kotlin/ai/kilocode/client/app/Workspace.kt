@@ -13,4 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 class Workspace(
     val directory: String,
     val state: StateFlow<KiloWorkspaceStateDto>,
+    val reload: () -> Unit,
+    val refreshConfigFiles: () -> Unit = {},
 )

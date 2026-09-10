@@ -10,15 +10,8 @@
     "customConditions": ["browser"],
     "paths": {
       "@/*": ["./src/*"],
-      "@tui/*": ["./src/cli/cmd/tui/*"],
+      "@tui/*": ["../tui/src/*"], // kilocode_change - extracted TUI imports used by Kilo-owned components
       "@test/*": ["./test/*"]
-    },
-    "plugins": [
-      {
-        "name": "@effect/language-service",
-        "transform": "@effect/language-service/transform",
-        "namespaceImportPackages": ["effect", "@effect/*"]
-      }
-    ]
+    }
   }
 }

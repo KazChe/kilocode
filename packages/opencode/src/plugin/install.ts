@@ -8,9 +8,9 @@ import {
 } from "jsonc-parser"
 
 import * as ConfigPaths from "@/config/paths"
-import { Global } from "@/global"
-import { Filesystem } from "@/util"
-import { Flock } from "@opencode-ai/shared/util/flock"
+import { Global } from "@opencode-ai/core/global"
+import { Filesystem } from "@/util/filesystem"
+import { Flock } from "@opencode-ai/core/util/flock"
 import { isRecord } from "@/util/record"
 
 import { parsePluginSpecifier, readPackageThemes, readPluginPackage, resolvePluginTarget } from "./shared"
@@ -334,7 +334,7 @@ function patchDir(input: PatchInput) {
   if (input.global) return input.config ?? Global.Path.config
   const git = input.vcs === "git" && input.worktree !== "/"
   const root = git ? input.worktree : input.directory
-  return path.join(root, ".opencode")
+  return path.join(root, ".kilo") // kilocode_change
 }
 
 function patchName(kind: Kind): "opencode" | "tui" {

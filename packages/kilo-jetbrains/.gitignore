@@ -2,7 +2,9 @@
 build/
 .intellijPlatform/
 .ai/
-**/.kilo
+**/.kilo/*
+!**/.kilo/skills/
+!**/.kilo/skills/**
 .classpath
 .project
 .settings/
@@ -14,3 +16,8 @@ bin/
 **/.kotlin/
 **/bin/
 !gradle/wrapper/gradle-wrapper.jar
+
+# Downloaded CLI artifacts
+**/cli-cache/
+kilo-*.zip
+kilo-*.tar.gz

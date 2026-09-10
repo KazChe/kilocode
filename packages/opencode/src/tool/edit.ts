@@ -3,24 +3,26 @@
 // https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
 // https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
 
-import z from "zod"
 import * as path from "path"
-import { Effect } from "effect"
+import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
-import { LSP } from "../lsp"
+import { LSP } from "@/lsp/lsp"
 import { createTwoFilesPatch, diffLines } from "diff"
 import DESCRIPTION from "./edit.txt"
-import { File } from "../file"
-import { FileWatcher } from "../file/watcher"
-import { Bus } from "../bus"
+import { FileSystem } from "@opencode-ai/core/filesystem"
+import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { Format } from "../format"
-import { Instance } from "../project/instance"
+import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
-import { AppFileSystem } from "@opencode-ai/shared/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import * as Bom from "@/util/bom"
 import { filterDiagnostics } from "./diagnostics" // kilocode_change
 import { ConfigValidation } from "../kilocode/config-validation" // kilocode_change
-import { EncodedIO } from "../kilocode/tool/encoded-io" // kilocode_change
+import * as EncodedIO from "../kilocode/tool/encoded-io" // kilocode_change
+import * as Encoding from "../kilocode/encoding" // kilocode_change
+import { assertMutablePath } from "../kilocode/agent-manager/protection" // kilocode_change
 
 const MAX_DIFF_CONTENT = 500_000 // kilocode_change
 
@@ -57,25 +59,41 @@ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
   return text.replaceAll("\n", "\r\n")
 }
 
-const Parameters = z.object({
-  filePath: z.string().describe("The absolute path to the file to modify"),
-  oldString: z.string().describe("The text to replace"),
-  newString: z.string().describe("The text to replace it with (must be different from oldString)"),
-  replaceAll: z.boolean().optional().describe("Replace all occurrences of oldString (default false)"),
+const locks = new Map<string, Semaphore.Semaphore>()
+
+function lock(filePath: string) {
+  const resolvedFilePath = FSUtil.resolve(filePath)
+  const hit = locks.get(resolvedFilePath)
+  if (hit) return hit
+
+  const next = Semaphore.makeUnsafe(1)
+  locks.set(resolvedFilePath, next)
+  return next
+}
+
+export const Parameters = Schema.Struct({
+  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
+  oldString: Schema.String.annotate({ description: "The text to replace" }),
+  newString: Schema.String.annotate({
+    description: "The text to replace it with (must be different from oldString)",
+  }),
+  replaceAll: Schema.optional(Schema.Boolean).annotate({
+    description: "Replace all occurrences of oldString (default false)",
+  }),
 })
 
 export const EditTool = Tool.define(
   "edit",
   Effect.gen(function* () {
     const lsp = yield* LSP.Service
-    const afs = yield* AppFileSystem.Service
+    const afs = yield* FSUtil.Service
     const format = yield* Format.Service
-    const bus = yield* Bus.Service
+    const events = yield* EventV2Bridge.Service
 
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           if (!params.filePath) {
             throw new Error("filePath is required")
@@ -85,29 +103,84 @@ export const EditTool = Tool.define(
             throw new Error("No changes to apply: oldString and newString are identical.")
           }
 
+          const instance = yield* InstanceState.context
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
-            : path.join(Instance.directory, params.filePath)
+            : path.join(instance.directory, params.filePath)
+          assertMutablePath(filePath) // kilocode_change
           yield* assertExternalDirectoryEffect(ctx, filePath)
 
           let diff = ""
           let contentOld = ""
           let contentNew = ""
           let cachedFilediff: Snapshot.FileDiff | undefined // kilocode_change
-          yield* Effect.gen(function* () {
-            if (params.oldString === "") {
-              const existed = yield* afs.existsSafe(filePath)
-              // kilocode_change start - preserve file encoding on write
-              const pre = existed ? yield* EncodedIO.read(filePath) : { text: "", encoding: "utf-8" }
-              contentOld = pre.text
-              const encoding = pre.encoding
+          yield* lock(filePath).withPermits(1)(
+            Effect.gen(function* () {
+              if (params.oldString === "") {
+                const existed = yield* afs.existsSafe(filePath)
+                if (existed) {
+                  throw new Error(
+                    "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+                  )
+                }
+                const next = Bom.split(params.newString)
+                const desiredBom = next.bom
+                contentOld = ""
+                contentNew = next.text
+                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                cachedFilediff = buildFileDiff(filePath, contentOld, contentNew) // kilocode_change
+                yield* ctx.ask({
+                  permission: "edit",
+                  patterns: [path.relative(instance.worktree, filePath)],
+                  always: ["*"],
+                  metadata: {
+                    filepath: filePath,
+                    diff,
+                    filediff: cachedFilediff, // kilocode_change
+                  },
+                })
+                yield* EncodedIO.write(afs, filePath, Bom.join(contentNew, desiredBom), Encoding.DEFAULT) // kilocode_change - encoding-aware write (mkdirs) replaces afs.writeWithDirs
+                if (yield* format.file(filePath)) {
+                  contentNew = yield* EncodedIO.sync(afs, filePath, desiredBom, Encoding.DEFAULT)
+                }
+                yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+                yield* events.publish(Watcher.Event.Updated, {
+                  file: filePath,
+                  event: "add",
+                })
+                return
+              }
+
+              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+              if (!info) throw new Error(`File ${filePath} not found`)
+              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+              // kilocode_change start - encoding-aware read; Encoding.read strips UTF-8 BOMs so
+              // derive the BOM flag from the detected encoding label instead of the decoded text.
+              const pre = yield* EncodedIO.read(afs, filePath)
+              const source = { bom: pre.encoding === "utf-8-bom", text: pre.text, encoding: pre.encoding }
               // kilocode_change end
-              contentNew = params.newString
-              diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+              contentOld = source.text
+
+              const ending = detectLineEnding(contentOld)
+              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
+              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
+
+              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
+              const desiredBom = source.bom || next.bom
+              contentNew = next.text
+
+              diff = trimDiff(
+                createTwoFilesPatch(
+                  filePath,
+                  filePath,
+                  normalizeLineEndings(contentOld),
+                  normalizeLineEndings(contentNew),
+                ),
+              )
               cachedFilediff = buildFileDiff(filePath, contentOld, contentNew) // kilocode_change
               yield* ctx.ask({
                 permission: "edit",
-                patterns: [path.relative(Instance.worktree, filePath)],
+                patterns: [path.relative(instance.worktree, filePath)],
                 always: ["*"],
                 metadata: {
                   filepath: filePath,
@@ -115,68 +188,26 @@ export const EditTool = Tool.define(
                   filediff: cachedFilediff, // kilocode_change
                 },
               })
-              yield* EncodedIO.write(filePath, params.newString, encoding) // kilocode_change - preserve encoding; replaces afs.writeWithDirs
-              yield* format.file(filePath)
-              yield* bus.publish(File.Event.Edited, { file: filePath })
-              yield* bus.publish(FileWatcher.Event.Updated, {
+
+              yield* EncodedIO.write(afs, filePath, Bom.join(contentNew, desiredBom), source.encoding) // kilocode_change - encoding-aware write replaces afs.writeWithDirs
+              if (yield* format.file(filePath)) {
+                contentNew = yield* EncodedIO.sync(afs, filePath, desiredBom, source.encoding)
+              }
+              yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+              yield* events.publish(Watcher.Event.Updated, {
                 file: filePath,
-                event: existed ? "change" : "add",
+                event: "change",
               })
-              return
-            }
-
-            const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-            if (!info) throw new Error(`File ${filePath} not found`)
-            if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
-            // kilocode_change start - preserve file encoding
-            const pre = yield* EncodedIO.read(filePath)
-            contentOld = pre.text
-            const encoding = pre.encoding
-            // kilocode_change end
-
-            const ending = detectLineEnding(contentOld)
-            const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
-            const next = convertToLineEnding(normalizeLineEndings(params.newString), ending)
-
-            contentNew = replace(contentOld, old, next, params.replaceAll)
-
-            diff = trimDiff(
-              createTwoFilesPatch(
-                filePath,
-                filePath,
-                normalizeLineEndings(contentOld),
-                normalizeLineEndings(contentNew),
-              ),
-            )
-            cachedFilediff = buildFileDiff(filePath, contentOld, contentNew) // kilocode_change
-            yield* ctx.ask({
-              permission: "edit",
-              patterns: [path.relative(Instance.worktree, filePath)],
-              always: ["*"],
-              metadata: {
-                filepath: filePath,
-                diff,
-                filediff: cachedFilediff, // kilocode_change
-              },
-            })
-
-            yield* EncodedIO.write(filePath, contentNew, encoding) // kilocode_change - preserve encoding; replaces afs.writeWithDirs
-            yield* format.file(filePath)
-            yield* bus.publish(File.Event.Edited, { file: filePath })
-            yield* bus.publish(FileWatcher.Event.Updated, {
-              file: filePath,
-              event: "change",
-            })
-            contentNew = (yield* EncodedIO.read(filePath)).text // kilocode_change - re-read via encoding-aware helper; replaces afs.readFileString
-            diff = trimDiff(
-              createTwoFilesPatch(
-                filePath,
-                filePath,
-                normalizeLineEndings(contentOld),
-                normalizeLineEndings(contentNew),
-              ),
-            )
-          }).pipe(Effect.orDie)
+              diff = trimDiff(
+                createTwoFilesPatch(
+                  filePath,
+                  filePath,
+                  normalizeLineEndings(contentOld),
+                  normalizeLineEndings(contentNew),
+                ),
+              )
+            }).pipe(Effect.orDie),
+          )
 
           const filediff: Snapshot.FileDiff = cachedFilediff ?? buildFileDiff(filePath, contentOld, contentNew) // kilocode_change
 
@@ -189,9 +220,9 @@ export const EditTool = Tool.define(
           })
 
           let output = "Edit applied successfully."
-          yield* lsp.touchFile(filePath, true)
+          yield* lsp.touchFile(filePath, "document")
           const diagnostics = yield* lsp.diagnostics()
-          const normalizedFilePath = AppFileSystem.normalizePath(filePath)
+          const normalizedFilePath = FSUtil.normalizePath(filePath)
           const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
           if (block) output += `\n\nLSP errors detected in this file, please fix:\n${block}`
           output += yield* Effect.promise(() => ConfigValidation.check(filePath)) // kilocode_change
@@ -202,7 +233,7 @@ export const EditTool = Tool.define(
               diff,
               filediff, // kilocode_change
             },
-            title: `${path.relative(Instance.worktree, filePath)}`,
+            title: `${path.relative(instance.worktree, filePath)}`,
             output,
           }
         }),
@@ -213,8 +244,8 @@ export const EditTool = Tool.define(
 export type Replacer = (content: string, find: string) => Generator<string, void, unknown>
 
 // Similarity thresholds for block anchor fallback matching
-const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.0
-const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.3
+const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.65
+const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.65
 
 /**
  * Levenshtein distance algorithm implementation
@@ -296,6 +327,7 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
   const firstLineSearch = searchLines[0].trim()
   const lastLineSearch = searchLines[searchLines.length - 1].trim()
   const searchBlockSize = searchLines.length
+  const maxLineDelta = Math.max(1, Math.floor(searchBlockSize * 0.25))
 
   // Collect all candidate positions where both anchors match
   const candidates: Array<{ startLine: number; endLine: number }> = []
@@ -307,7 +339,10 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
     // Look for the matching last line after this first line
     for (let j = i + 2; j < originalLines.length; j++) {
       if (originalLines[j].trim() === lastLineSearch) {
-        candidates.push({ startLine: i, endLine: j })
+        const actualBlockSize = j - i + 1
+        if (Math.abs(actualBlockSize - searchBlockSize) <= maxLineDelta) {
+          candidates.push({ startLine: i, endLine: j })
+        }
         break // Only match the first occurrence of the last line
       }
     }
@@ -324,7 +359,7 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
     const actualBlockSize = endLine - startLine + 1
 
     let similarity = 0
-    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+    const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
 
     if (linesToCheck > 0) {
       for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
@@ -373,7 +408,7 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
     const actualBlockSize = endLine - startLine + 1
 
     let similarity = 0
-    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+    const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
 
     if (linesToCheck > 0) {
       for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
@@ -675,6 +710,11 @@ export function replace(content: string, oldString: string, newString: string, r
   if (oldString === newString) {
     throw new Error("No changes to apply: oldString and newString are identical.")
   }
+  if (oldString === "") {
+    throw new Error(
+      "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+    )
+  }
 
   let notFound = true
 
@@ -693,6 +733,11 @@ export function replace(content: string, oldString: string, newString: string, r
       const index = content.indexOf(search)
       if (index === -1) continue
       notFound = false
+      if (isDisproportionateMatch(search, oldString)) {
+        throw new Error(
+          "Refusing replacement because the matched span is much larger than oldString. Re-read the file and provide the full exact oldString for the intended replacement.",
+        )
+      }
       if (replaceAll) {
         return content.replaceAll(search, newString)
       }
@@ -708,4 +753,12 @@ export function replace(content: string, oldString: string, newString: string, r
     )
   }
   throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+}
+
+function isDisproportionateMatch(search: string, oldString: string) {
+  const oldLines = oldString.split("\n").length
+  const searchLines = search.split("\n").length
+  if (searchLines >= Math.max(oldLines + 3, oldLines * 2)) return true
+  if (oldLines === 1) return false
+  return search.trim().length > Math.max(oldString.trim().length + 500, oldString.trim().length * 4)
 }

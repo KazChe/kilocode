@@ -6,11 +6,18 @@ import { Button } from "@kilocode/kilo-ui/button"
 import { IconButton } from "@kilocode/kilo-ui/icon-button"
 
 import { useConfig } from "../../context/config"
+import { useProvider } from "../../context/provider"
 import { useSession } from "../../context/session"
 import { useLanguage } from "../../context/language"
-import type { AgentConfig, AgentInfo, PermissionRuleItem } from "../../types/messages"
+import type { AgentConfig, AgentInfo, PermissionConfig, PermissionRuleItem } from "../../types/messages"
+import { removable } from "./agent-behaviour-patches"
+import { parseModelString } from "../../../../src/shared/provider-model"
 import SettingsRow from "./SettingsRow"
 import { buildExport } from "./mode-io"
+import { modelPatch } from "./mode-model"
+import PermissionEditor from "./PermissionEditor"
+import { ModelSelectorBase } from "../shared/ModelSelector"
+import { ThinkingSelectorBase } from "../shared/ThinkingSelector"
 
 interface Props {
   name: string
@@ -21,6 +28,7 @@ interface Props {
 const ModeEditView: Component<Props> = (props) => {
   const language = useLanguage()
   const { config, updateConfig } = useConfig()
+  const provider = useProvider()
   const session = useSession()
 
   // agent() may be undefined for modes that only exist in the config draft (just
@@ -31,6 +39,13 @@ const ModeEditView: Component<Props> = (props) => {
   const [expanded, setExpanded] = createSignal(false)
 
   const cfg = createMemo<AgentConfig>(() => config().agent?.[props.name] ?? {})
+  const model = createMemo(() => parseModelString(cfg().model ?? undefined))
+  const variants = createMemo(() => {
+    const sel = model()
+    if (!sel) return []
+    return Object.keys(provider.findModel(sel)?.variants ?? {})
+  })
+  const showVariant = () => variants().length > 0 || !!cfg().variant
 
   const update = (partial: Partial<AgentConfig>) => {
     const existing = config().agent ?? {}
@@ -41,6 +56,24 @@ const ModeEditView: Component<Props> = (props) => {
         [props.name]: { ...current, ...partial },
       },
     })
+  }
+
+  const selectModel = (providerID: string, modelID: string) => {
+    const sel = { providerID, modelID }
+    const list = Object.keys(provider.findModel(sel)?.variants ?? {})
+    update(modelPatch(providerID, modelID, list, cfg().variant))
+  }
+
+  const selectVariant = (value: string) => {
+    update({ variant: value })
+  }
+
+  const clearVariant = () => {
+    update({ variant: null })
+  }
+
+  const updatePermission = (patch: PermissionConfig) => {
+    updateConfig({ agent: { [props.name]: { permission: patch } } })
   }
 
   const exportMode = () => {
@@ -67,7 +100,7 @@ const ModeEditView: Component<Props> = (props) => {
       >
         <div style={{ display: "flex", "align-items": "center" }}>
           <IconButton size="small" variant="ghost" icon="arrow-left" onClick={props.onBack} />
-          <span style={{ "font-weight": "600", "font-size": "14px", "margin-left": "8px" }}>
+          <span style={{ "font-weight": "600", "font-size": "var(--kilo-font-size-14)", "margin-left": "8px" }}>
             {language.t("settings.agentBehaviour.editMode")} — {props.name}
           </span>
         </div>
@@ -80,15 +113,17 @@ const ModeEditView: Component<Props> = (props) => {
               title={language.t("settings.agentBehaviour.exportMode")}
               onClick={exportMode}
             />
-            <IconButton
-              size="small"
-              variant="ghost"
-              icon="close"
-              onClick={() => {
-                const a = agent()
-                if (a) props.onRemove(a)
-              }}
-            />
+            <Show when={removable(agent())}>
+              <IconButton
+                size="small"
+                variant="ghost"
+                icon="close"
+                onClick={() => {
+                  const a = agent()
+                  if (a) props.onRemove(a)
+                }}
+              />
+            </Show>
           </div>
         </Show>
       </div>
@@ -97,7 +132,7 @@ const ModeEditView: Component<Props> = (props) => {
         <Card style={{ "margin-bottom": "12px" }}>
           <div
             style={{
-              "font-size": "12px",
+              "font-size": "var(--kilo-font-size-12)",
               color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
               padding: "4px 0",
             }}
@@ -142,12 +177,34 @@ const ModeEditView: Component<Props> = (props) => {
           title={language.t("settings.agentBehaviour.modelOverride.title")}
           description={language.t("settings.agentBehaviour.modelOverride.description")}
         >
-          <TextField
-            value={cfg().model ?? ""}
-            placeholder="e.g. anthropic/claude-sonnet-4-20250514"
-            onChange={(val) => update({ model: val || undefined })}
+          <ModelSelectorBase
+            value={model()}
+            onSelect={selectModel}
+            placement="bottom-start"
+            allowClear
+            clearLabel={language.t("settings.providers.notSet")}
+            label={language.t("settings.agentBehaviour.modelOverride.title")}
+            description={language.t("settings.agentBehaviour.modelOverride.description")}
           />
         </SettingsRow>
+
+        <Show when={showVariant()}>
+          <SettingsRow
+            title={language.t("settings.agentBehaviour.variantOverride.title")}
+            description={language.t("settings.agentBehaviour.variantOverride.description")}
+          >
+            <ThinkingSelectorBase
+              variants={variants()}
+              value={cfg().variant ?? undefined}
+              onSelect={selectVariant}
+              onClear={clearVariant}
+              allowClear
+              clearLabel={language.t("settings.providers.notSet")}
+              placement="bottom-start"
+              globalTrigger={false}
+            />
+          </SettingsRow>
+        </Show>
 
         <SettingsRow
           title={language.t("settings.agentBehaviour.temperature.title")}
@@ -198,10 +255,11 @@ const ModeEditView: Component<Props> = (props) => {
           <Switch
             checked={cfg().hidden ?? false}
             onChange={(val) => {
-              update({ hidden: val || undefined })
-              // Clear default_agent if hiding the current default
+              // Send explicit `false` (not `undefined`) so deepMerge can overwrite a previously-saved `true`.
+              update({ hidden: val })
+              // Clear default_agent if hiding the current default (null = delete sentinel).
               if (val && config().default_agent === props.name) {
-                updateConfig({ default_agent: undefined })
+                updateConfig({ default_agent: null })
               }
             }}
             hideLabel
@@ -218,10 +276,11 @@ const ModeEditView: Component<Props> = (props) => {
           <Switch
             checked={cfg().disable ?? false}
             onChange={(val) => {
-              update({ disable: val || undefined })
-              // Clear default_agent if disabling the current default
+              // Send explicit `false` (not `undefined`) so deepMerge can overwrite a previously-saved `true`.
+              update({ disable: val })
+              // Clear default_agent if disabling the current default (null = delete sentinel).
               if (val && config().default_agent === props.name) {
-                updateConfig({ default_agent: undefined })
+                updateConfig({ default_agent: null })
               }
             }}
             hideLabel
@@ -230,6 +289,48 @@ const ModeEditView: Component<Props> = (props) => {
           </Switch>
         </SettingsRow>
       </Card>
+
+      <Show when={!native()}>
+        <Card
+          style={{
+            "margin-bottom": "12px",
+            padding: "0",
+            overflow: "hidden",
+            border: "1px solid var(--border-base, var(--vscode-panel-border))",
+          }}
+        >
+          <div
+            style={{
+              padding: "14px 16px 12px",
+              "border-bottom": "1px solid var(--border-weak-base, var(--vscode-panel-border))",
+              background: "var(--bg-subtle-base, var(--vscode-editorWidget-background))",
+            }}
+          >
+            <div data-slot="settings-row-label-title" style={{ "margin-bottom": "6px" }}>
+              Per-Agent Permissions
+            </div>
+            <div
+              style={{
+                "font-size": "var(--kilo-font-size-12)",
+                color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
+                "line-height": "1.45",
+              }}
+            >
+              These settings only apply to this custom agent. Change a dropdown from Default to create an override, or
+              use Add path/Add command for tool-specific exceptions.
+            </div>
+          </div>
+          <div style={{ padding: "0 16px 4px" }}>
+            <PermissionEditor
+              permissions={cfg().permission}
+              rules={agent()?.permission}
+              component="agent-permission-settings"
+              inherited
+              onChange={updatePermission}
+            />
+          </div>
+        </Card>
+      </Show>
 
       {/* Calculated permissions (read-only, collapsible) */}
       <Show when={agent()?.permission} keyed>
@@ -316,7 +417,7 @@ const PermissionRuleset: Component<RulesetProps> = (props) => {
         <span
           style={{
             "margin-left": "8px",
-            "font-size": "11px",
+            "font-size": "var(--kilo-font-size-11)",
             color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
           }}
         >
@@ -339,7 +440,7 @@ const PermissionRuleset: Component<RulesetProps> = (props) => {
           <div style={{ "margin-top": "8px", "margin-bottom": "8px" }}>
             <div
               style={{
-                "font-size": "11px",
+                "font-size": "var(--kilo-font-size-11)",
                 color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
                 "margin-bottom": "4px",
               }}
@@ -353,7 +454,7 @@ const PermissionRuleset: Component<RulesetProps> = (props) => {
                   return (
                     <span
                       style={{
-                        "font-size": "11px",
+                        "font-size": "var(--kilo-font-size-11)",
                         padding: "2px 6px",
                         "border-radius": "3px",
                         background: colors.bg,
@@ -374,7 +475,7 @@ const PermissionRuleset: Component<RulesetProps> = (props) => {
         <div
           style={{
             "margin-top": "8px",
-            "font-size": "11px",
+            "font-size": "var(--kilo-font-size-11)",
             "font-family": "var(--vscode-editor-font-family, monospace)",
             "max-height": "300px",
             "overflow-y": "auto",
@@ -438,7 +539,7 @@ const PermissionRuleset: Component<RulesetProps> = (props) => {
         <div
           style={{
             "margin-top": "6px",
-            "font-size": "10px",
+            "font-size": "var(--kilo-font-size-10)",
             color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
           }}
         >

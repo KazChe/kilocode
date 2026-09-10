@@ -1,19 +1,28 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { expect, describe, afterAll } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Bus } from "../../../src/bus"
 import { Permission } from "../../../src/permission"
-import { PermissionID } from "../../../src/permission/schema"
+import { EventV2Bridge } from "../../../src/event-v2-bridge"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Database } from "@opencode-ai/core/database/database"
 import { SessionID } from "../../../src/session/schema"
 import * as Config from "../../../src/config/config"
-import { Global } from "../../../src/global"
-import * as CrossSpawnSpawner from "../../../src/effect/cross-spawn-spawner"
+import { InstanceRuntime } from "../../../src/project/instance-runtime"
+import { Global } from "@opencode-ai/core/global"
+import * as CrossSpawnSpawner from "@opencode-ai/core/cross-spawn-spawner"
 import { provideTmpdirInstance } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
 
 const bus = Bus.layer
-const env = Layer.mergeAll(Permission.layer.pipe(Layer.provide(bus)), bus, CrossSpawnSpawner.defaultLayer)
+const env = Layer.mergeAll(
+  AppNodeBuilder.build(Permission.node),
+  AppNodeBuilder.build(Config.node),
+  bus,
+  AppNodeBuilder.build(CrossSpawnSpawner.node),
+)
 const it = testEffect(env)
 
 afterAll(async () => {
@@ -21,7 +30,10 @@ afterAll(async () => {
   for (const file of ["kilo.jsonc", "kilo.json", "config.json", "opencode.json", "opencode.jsonc"]) {
     await fs.rm(path.join(dir, file), { force: true }).catch(() => {})
   }
-  await Config.invalidate(true)
+  await Effect.runPromise(
+    Config.Service.use((svc) => svc.invalidate()).pipe(Effect.scoped, Effect.provide(AppNodeBuilder.build(Config.node))),
+  )
+  await InstanceRuntime.disposeAllInstances()
 })
 
 const ask = (input: Parameters<Permission.Interface["ask"]>[0]) =>
@@ -75,7 +87,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_1"),
+          id: PermissionV1.ID.make("permission_1"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["npm install"],
@@ -86,10 +98,10 @@ describe("saveAlwaysRules", () => {
 
         yield* waitForPending(1)
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_1"),
+          requestID: PermissionV1.ID.make("permission_1"),
           approvedAlways: ["npm install"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_1"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_1"), reply: "once" })
         yield* Fiber.join(asking)
 
         const result = yield* ask({
@@ -100,7 +112,7 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(result).toBeUndefined()
+        expect(result.manual).toBe(false)
       }),
     ),
   )
@@ -109,7 +121,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_2"),
+          id: PermissionV1.ID.make("permission_2"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["rm -rf /"],
@@ -120,10 +132,10 @@ describe("saveAlwaysRules", () => {
 
         yield* waitForPending(1)
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_2"),
+          requestID: PermissionV1.ID.make("permission_2"),
           deniedAlways: ["rm -rf /"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_2"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_2"), reply: "once" })
         yield* Fiber.join(asking)
 
         const exit = yield* ask({
@@ -139,14 +151,20 @@ describe("saveAlwaysRules", () => {
     ),
   )
 
-  it.live("silently skips unknown request ID", () =>
+  it.live("fails for unknown request ID", () =>
     withDir({ git: true }, () =>
       Effect.gen(function* () {
-        // saveAlwaysRules silently returns when the request ID is not in the pending map
-        yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_nonexistent"),
+        const exit = yield* saveAlwaysRules({
+          requestID: PermissionV1.ID.make("permission_nonexistent"),
           approvedAlways: ["npm install"],
-        })
+        }).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toMatchObject({
+            _tag: "Permission.NotFoundError",
+            requestID: "permission_nonexistent",
+          })
+        }
       }),
     ),
   )
@@ -155,7 +173,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_3"),
+          id: PermissionV1.ID.make("permission_3"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["npm install"],
@@ -167,11 +185,11 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // "curl" is not in metadata.rules or always — should be silently ignored
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_3"),
+          requestID: PermissionV1.ID.make("permission_3"),
           approvedAlways: ["npm install", "curl http://evil.com"],
         })
 
-        yield* reply({ requestID: PermissionID.make("permission_3"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_3"), reply: "once" })
         yield* Fiber.join(asking)
 
         // npm install was in rules — auto-allowed
@@ -183,11 +201,11 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(result).toBeUndefined()
+        expect(result.manual).toBe(false)
 
         // curl was NOT in rules — still requires permission
         const curlFiber = yield* ask({
-          id: PermissionID.make("permission_curl"),
+          id: PermissionV1.ID.make("permission_curl"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["curl http://evil.com"],
@@ -197,7 +215,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         yield* waitForPending(1)
-        yield* reply({ requestID: PermissionID.make("permission_curl"), reply: "reject" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_curl"), reply: "reject" })
         expectFailure(yield* Fiber.await(curlFiber), Permission.RejectedError)
       }),
     ),
@@ -207,7 +225,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_nonbash"),
+          id: PermissionV1.ID.make("permission_nonbash"),
           sessionID: SessionID.make("session_test"),
           permission: "read",
           patterns: ["src/main.ts"],
@@ -219,10 +237,10 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // "*" is in always — should be accepted even without metadata.rules
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_nonbash"),
+          requestID: PermissionV1.ID.make("permission_nonbash"),
           approvedAlways: ["*"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_nonbash"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_nonbash"), reply: "once" })
         yield* Fiber.join(asking)
 
         // "*" wildcard should auto-allow any read
@@ -234,7 +252,164 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(result).toBeUndefined()
+        expect(result.manual).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("saved always approval does not override hard deny ruleset", () =>
+    withDir({ git: true }, () =>
+      Effect.gen(function* () {
+        const asking = yield* ask({
+          id: PermissionV1.ID.make("permission_hard_deny_seed"),
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["printf seed"],
+          metadata: {},
+          always: ["printf *"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+        yield* reply({ requestID: PermissionV1.ID.make("permission_hard_deny_seed"), reply: "always" })
+        yield* Fiber.join(asking)
+
+        const exit = yield* ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["printf bypass > ask-saved-bypass.txt"],
+          metadata: {},
+          always: [],
+          ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+          hardRuleset: [
+            { permission: "bash", pattern: "*", action: "deny" },
+            { permission: "bash", pattern: "printf *", action: "allow" },
+            { permission: "bash", pattern: "*>*", action: "deny" },
+            { permission: "bash", pattern: "* > *", action: "deny" },
+          ],
+        }).pipe(Effect.exit)
+        expectFailure(exit, Permission.DeniedError)
+      }),
+    ),
+  )
+
+  it.live("saved always approval still works when hard ruleset does not deny", () =>
+    withDir({ git: true }, () =>
+      Effect.gen(function* () {
+        const asking = yield* ask({
+          id: PermissionV1.ID.make("permission_hard_ask_seed"),
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["gh issue list"],
+          metadata: {},
+          always: ["gh *"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+        yield* reply({ requestID: PermissionV1.ID.make("permission_hard_ask_seed"), reply: "always" })
+        yield* Fiber.join(asking)
+
+        const result = yield* ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["gh pr list"],
+          metadata: {},
+          always: [],
+          ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+          hardRuleset: [
+            { permission: "bash", pattern: "*", action: "deny" },
+            { permission: "bash", pattern: "gh *", action: "ask" },
+          ],
+        })
+        expect(result.manual).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("explicit external directory allows are not shadowed by ask plan broad denies", () =>
+    withDir({ git: true }, (dir) =>
+      Effect.gen(function* () {
+        const root = path.resolve(path.dirname(dir), "legacy")
+        const glob = path.join(root, "*")
+        const ruleset: Permission.Ruleset = [
+          { permission: "external_directory", pattern: "*", action: "ask" },
+          { permission: "external_directory", pattern: glob, action: "allow" },
+          { permission: "*", pattern: "*", action: "deny" },
+        ]
+
+        const result = yield* ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "external_directory",
+          patterns: [glob],
+          metadata: { filepath: path.join(root, "main.ts"), parentDir: root },
+          always: [glob],
+          ruleset,
+          hardRuleset: ruleset,
+        })
+        expect(result.manual).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("saved external directory approvals survive ask plan hard rules", () =>
+    withDir({ git: true }, (dir) =>
+      Effect.gen(function* () {
+        const root = path.resolve(path.dirname(dir), "legacy")
+        const glob = path.join(root, "*")
+        const asking = yield* ask({
+          id: PermissionV1.ID.make("permission_external_seed"),
+          sessionID: SessionID.make("session_test"),
+          permission: "external_directory",
+          patterns: [glob],
+          metadata: { filepath: path.join(root, "main.ts"), parentDir: root },
+          always: [glob],
+          ruleset: [{ permission: "external_directory", pattern: "*", action: "ask" }],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+        yield* reply({ requestID: PermissionV1.ID.make("permission_external_seed"), reply: "always" })
+        yield* Fiber.join(asking)
+
+        const result = yield* ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "external_directory",
+          patterns: [glob],
+          metadata: { filepath: path.join(root, "main.ts"), parentDir: root },
+          always: [glob],
+          ruleset: [
+            { permission: "external_directory", pattern: "*", action: "ask" },
+            { permission: "*", pattern: "*", action: "deny" },
+          ],
+          hardRuleset: [{ permission: "*", pattern: "*", action: "deny" }],
+        })
+        expect(result.manual).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("explicit external directory denies still win over ask plan exceptions", () =>
+    withDir({ git: true }, (dir) =>
+      Effect.gen(function* () {
+        const root = path.resolve(path.dirname(dir), "legacy")
+        const glob = path.join(root, "*")
+        const exit = yield* ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "external_directory",
+          patterns: [glob],
+          metadata: { filepath: path.join(root, "main.ts"), parentDir: root },
+          always: [glob],
+          ruleset: [
+            { permission: "external_directory", pattern: glob, action: "allow" },
+            { permission: "external_directory", pattern: glob, action: "deny" },
+            { permission: "*", pattern: "*", action: "deny" },
+          ],
+          hardRuleset: [
+            { permission: "*", pattern: "*", action: "deny" },
+            { permission: "external_directory", pattern: glob, action: "deny" },
+          ],
+        }).pipe(Effect.exit)
+        expectFailure(exit, Permission.DeniedError)
       }),
     ),
   )
@@ -243,7 +418,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_4"),
+          id: PermissionV1.ID.make("permission_4"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["npm install lodash"],
@@ -255,10 +430,10 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // Approve the broadest hierarchy level
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_4"),
+          requestID: PermissionV1.ID.make("permission_4"),
           approvedAlways: ["npm *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_4"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_4"), reply: "once" })
         yield* Fiber.join(asking)
 
         // "npm *" wildcard should auto-allow any npm command
@@ -270,7 +445,7 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(result).toBeUndefined()
+        expect(result.manual).toBe(false)
       }),
     ),
   )
@@ -279,7 +454,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_5"),
+          id: PermissionV1.ID.make("permission_5"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["npm install lodash"],
@@ -291,11 +466,11 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // Deny broad, allow specific — specific should win
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_5"),
+          requestID: PermissionV1.ID.make("permission_5"),
           approvedAlways: ["npm install *"],
           deniedAlways: ["npm *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_5"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_5"), reply: "once" })
         yield* Fiber.join(asking)
 
         // "npm install foo" matches both rules; "npm install *" (allow) comes
@@ -308,7 +483,7 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(result).toBeUndefined()
+        expect(result.manual).toBe(false)
       }),
     ),
   )
@@ -317,7 +492,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_6"),
+          id: PermissionV1.ID.make("permission_6"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["git log --oneline"],
@@ -328,11 +503,11 @@ describe("saveAlwaysRules", () => {
 
         yield* waitForPending(1)
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_6"),
+          requestID: PermissionV1.ID.make("permission_6"),
           approvedAlways: ["git log *"],
           deniedAlways: ["git *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_6"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_6"), reply: "once" })
         yield* Fiber.join(asking)
 
         // "git log --oneline" should be allowed (specific allow after broad deny)
@@ -344,7 +519,7 @@ describe("saveAlwaysRules", () => {
           always: [],
           ruleset: [],
         })
-        expect(allowed).toBeUndefined()
+        expect(allowed.manual).toBe(false)
 
         // "git status" should be denied (only matches broad deny)
         const exit = yield* ask({
@@ -364,7 +539,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const asking = yield* ask({
-          id: PermissionID.make("permission_7"),
+          id: PermissionV1.ID.make("permission_7"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["npm install"],
@@ -376,15 +551,15 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // "curl" is not in metadata.rules — should be silently ignored
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_7"),
+          requestID: PermissionV1.ID.make("permission_7"),
           approvedAlways: ["npm *", "curl *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_7"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_7"), reply: "once" })
         yield* Fiber.join(asking)
 
         // curl should still require permission (not auto-allowed)
         const curlFiber = yield* ask({
-          id: PermissionID.make("permission_curl2"),
+          id: PermissionV1.ID.make("permission_curl2"),
           sessionID: SessionID.make("session_test"),
           permission: "bash",
           patterns: ["curl http://example.com"],
@@ -394,7 +569,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         yield* waitForPending(1)
-        yield* reply({ requestID: PermissionID.make("permission_curl2"), reply: "reject" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_curl2"), reply: "reject" })
         expectFailure(yield* Fiber.await(curlFiber), Permission.RejectedError)
       }),
     ),
@@ -404,7 +579,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_a"),
+          id: PermissionV1.ID.make("permission_a"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["npm install"],
@@ -414,7 +589,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_b"),
+          id: PermissionV1.ID.make("permission_b"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["npm test"],
@@ -426,12 +601,12 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(2)
         // User approves "npm *" on subagent A's permission
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_a"),
+          requestID: PermissionV1.ID.make("permission_a"),
           approvedAlways: ["npm *"],
         })
 
         // Subagent B should auto-resolve because "npm test" matches "npm *"
-        yield* reply({ requestID: PermissionID.make("permission_a"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_a"), reply: "once" })
         yield* Fiber.join(fiberA)
         yield* Fiber.join(fiberB)
       }),
@@ -442,7 +617,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_a2"),
+          id: PermissionV1.ID.make("permission_a2"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["npm install lodash"],
@@ -452,7 +627,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_b2"),
+          id: PermissionV1.ID.make("permission_b2"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["npm run build"],
@@ -462,7 +637,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberC = yield* ask({
-          id: PermissionID.make("permission_c2"),
+          id: PermissionV1.ID.make("permission_c2"),
           sessionID: SessionID.make("session_c"),
           permission: "bash",
           patterns: ["npm test"],
@@ -474,10 +649,10 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(3)
         // Approve "npm *" on session A — should auto-resolve B and C
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_a2"),
+          requestID: PermissionV1.ID.make("permission_a2"),
           approvedAlways: ["npm *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_a2"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_a2"), reply: "once" })
 
         yield* Fiber.join(fiberA)
         yield* Fiber.join(fiberB)
@@ -490,7 +665,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_a3"),
+          id: PermissionV1.ID.make("permission_a3"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["npm install"],
@@ -500,7 +675,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_b3"),
+          id: PermissionV1.ID.make("permission_b3"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["curl http://example.com"],
@@ -512,14 +687,14 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(2)
         // Approve "npm *" — should NOT resolve B (curl doesn't match npm *)
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_a3"),
+          requestID: PermissionV1.ID.make("permission_a3"),
           approvedAlways: ["npm *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_a3"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_a3"), reply: "once" })
         yield* Fiber.join(fiberA)
 
         // B should still be pending — reject it to clean up
-        yield* reply({ requestID: PermissionID.make("permission_b3"), reply: "reject" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_b3"), reply: "reject" })
         expectFailure(yield* Fiber.await(fiberB), Permission.RejectedError)
       }),
     ),
@@ -529,7 +704,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_a4"),
+          id: PermissionV1.ID.make("permission_a4"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["npm install"],
@@ -541,7 +716,7 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(1)
         // Save rules but don't reply yet — the request itself should not be auto-resolved
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_a4"),
+          requestID: PermissionV1.ID.make("permission_a4"),
           approvedAlways: ["npm *"],
         })
 
@@ -549,8 +724,51 @@ describe("saveAlwaysRules", () => {
         const pending = yield* list()
         expect(pending.some((p) => String(p.id) === "permission_a4")).toBe(true)
 
-        yield* reply({ requestID: PermissionID.make("permission_a4"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_a4"), reply: "once" })
         yield* Fiber.join(fiberA)
+      }),
+    ),
+  )
+
+  it.live("saveAlwaysRules then reply(always) does not duplicate saved rules", () =>
+    withDir({ git: true }, () =>
+      Effect.gen(function* () {
+        const fiber = yield* ask({
+          id: PermissionV1.ID.make("permission_saved_always"),
+          sessionID: SessionID.make("session_saved_always"),
+          permission: "bash",
+          patterns: ["kilo-permission-8353 test"],
+          metadata: { rules: ["kilo-permission-8353 *", "kilo-permission-8353 test"] },
+          always: ["kilo-permission-8353 *", "kilo-permission-8353 test"],
+          ruleset: [],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+        yield* saveAlwaysRules({
+          requestID: PermissionV1.ID.make("permission_saved_always"),
+          approvedAlways: ["kilo-permission-8353 test"],
+        })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_saved_always"), reply: "always" })
+        yield* Fiber.join(fiber)
+
+        const config = yield* Config.Service
+        const cfg = yield* config.get()
+        expect(cfg.permission?.bash).toMatchObject({ "kilo-permission-8353 test": "allow" })
+        expect(cfg.permission?.bash).not.toMatchObject({ "kilo-permission-8353 *": "allow" })
+
+        const broad = yield* ask({
+          id: PermissionV1.ID.make("permission_saved_always_broad"),
+          sessionID: SessionID.make("session_saved_always"),
+          permission: "bash",
+          patterns: ["kilo-permission-8353 install"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+        yield* reply({ requestID: PermissionV1.ID.make("permission_saved_always_broad"), reply: "reject" })
+        expectFailure(yield* Fiber.await(broad), Permission.RejectedError)
       }),
     ),
   )
@@ -559,7 +777,7 @@ describe("saveAlwaysRules", () => {
     withDir({ git: true }, () =>
       Effect.gen(function* () {
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_a5"),
+          id: PermissionV1.ID.make("permission_a5"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["git log --oneline -5"],
@@ -569,7 +787,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_b5"),
+          id: PermissionV1.ID.make("permission_b5"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["git log --oneline -10"],
@@ -581,12 +799,12 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(2)
         // User denies "git log *" on subagent A
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_a5"),
+          requestID: PermissionV1.ID.make("permission_a5"),
           deniedAlways: ["git log *"],
         })
 
         // Subagent B should auto-reject because "git log --oneline -10" matches denied "git log *"
-        yield* reply({ requestID: PermissionID.make("permission_a5"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_a5"), reply: "once" })
         yield* Fiber.join(fiberA)
         expectFailure(yield* Fiber.await(fiberB), Permission.RejectedError)
       }),
@@ -599,7 +817,7 @@ describe("saveAlwaysRules", () => {
         // Subagent B has "git status && npm install" — two patterns.
         // Its ruleset already allows "npm install" but "git status" is "ask".
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_multi_b"),
+          id: PermissionV1.ID.make("permission_multi_b"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["git status", "npm install"],
@@ -613,7 +831,7 @@ describe("saveAlwaysRules", () => {
 
         // Subagent A gets "git status" approved
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_multi_a"),
+          id: PermissionV1.ID.make("permission_multi_a"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["git status"],
@@ -625,10 +843,10 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(2)
         // User approves "git *" on subagent A
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_multi_a"),
+          requestID: PermissionV1.ID.make("permission_multi_a"),
           approvedAlways: ["git *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_multi_a"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_multi_a"), reply: "once" })
 
         // B should auto-resolve: "git status" covered by new rule, "npm install" covered by original ruleset
         yield* Fiber.join(fiberA)
@@ -643,7 +861,7 @@ describe("saveAlwaysRules", () => {
         // Subagent B has "git status && curl http://evil.com" — two patterns.
         // Neither is allowed by the ruleset.
         const fiberB = yield* ask({
-          id: PermissionID.make("permission_multi_b2"),
+          id: PermissionV1.ID.make("permission_multi_b2"),
           sessionID: SessionID.make("session_b"),
           permission: "bash",
           patterns: ["git status", "curl http://evil.com"],
@@ -653,7 +871,7 @@ describe("saveAlwaysRules", () => {
         }).pipe(Effect.forkScoped)
 
         const fiberA = yield* ask({
-          id: PermissionID.make("permission_multi_a2"),
+          id: PermissionV1.ID.make("permission_multi_a2"),
           sessionID: SessionID.make("session_a"),
           permission: "bash",
           patterns: ["git status"],
@@ -665,17 +883,17 @@ describe("saveAlwaysRules", () => {
         yield* waitForPending(2)
         // User approves "git *" — covers "git status" but NOT "curl"
         yield* saveAlwaysRules({
-          requestID: PermissionID.make("permission_multi_a2"),
+          requestID: PermissionV1.ID.make("permission_multi_a2"),
           approvedAlways: ["git *"],
         })
-        yield* reply({ requestID: PermissionID.make("permission_multi_a2"), reply: "once" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_multi_a2"), reply: "once" })
         yield* Fiber.join(fiberA)
 
         // B should still be pending (curl not covered)
         const pending = yield* list()
         expect(pending.some((p) => String(p.id) === "permission_multi_b2")).toBe(true)
 
-        yield* reply({ requestID: PermissionID.make("permission_multi_b2"), reply: "reject" })
+        yield* reply({ requestID: PermissionV1.ID.make("permission_multi_b2"), reply: "reject" })
         expectFailure(yield* Fiber.await(fiberB), Permission.RejectedError)
       }),
     ),

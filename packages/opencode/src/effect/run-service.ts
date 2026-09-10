@@ -1,12 +1,12 @@
-import { Effect, Layer, ManagedRuntime } from "effect"
+import { Effect, Fiber, Layer, ManagedRuntime } from "effect"
 import * as Context from "effect/Context"
-import { Instance } from "@/project/instance"
-import { LocalContext } from "@/util"
 import { InstanceRef, WorkspaceRef } from "./instance-ref"
-import * as Observability from "./observability"
+import * as Observability from "@opencode-ai/core/observability"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
-import type { InstanceContext } from "@/project/instance"
-import { memoMap } from "./memo-map"
+import type { InstanceContext } from "@/project/instance-context"
+import { context as instanceContext } from "@/project/instance-context" // kilocode_change
+import { LocalContext } from "@/util/local-context" // kilocode_change
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 
 type Refs = {
   instance?: InstanceContext
@@ -24,15 +24,23 @@ export function attachWith<A, E, R>(effect: Effect.Effect<A, E, R>, refs: Refs):
 }
 
 export function attach<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
-  try {
-    return attachWith(effect, {
-      instance: Instance.current,
-      workspace: WorkspaceContext.workspaceID,
-    })
-  } catch (err) {
-    if (!(err instanceof LocalContext.NotFound)) throw err
-  }
-  return effect
+  const workspace = WorkspaceContext.workspaceID
+  const fiber = Fiber.getCurrent()
+  // kilocode_change start - bridge legacy AsyncLocalStorage instance context into Effect runtimes
+  const current = fiber ? Context.getReferenceUnsafe(fiber.context, InstanceRef) : undefined
+  const instance = (() => {
+    if (current) return current
+    try {
+      return instanceContext.use()
+    } catch (err) {
+      if (!(err instanceof LocalContext.NotFound)) throw err
+    }
+  })()
+  return attachWith(effect, {
+    instance,
+    // kilocode_change end
+    workspace: workspace ?? (fiber ? Context.getReferenceUnsafe(fiber.context, WorkspaceRef) : undefined),
+  })
 }
 
 export function makeRuntime<I, S, E>(service: Context.Service<I, S>, layer: Layer.Layer<I, E>) {
@@ -48,5 +56,12 @@ export function makeRuntime<I, S, E>(service: Context.Service<I, S>, layer: Laye
     runFork: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) => getRuntime().runFork(attach(service.use(fn))),
     runCallback: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) =>
       getRuntime().runCallback(attach(service.use(fn))),
+    // kilocode_change start - allow Kilo-owned service runtimes to release persistent resources
+    dispose: async () => {
+      const current = rt
+      rt = undefined
+      await current?.dispose()
+    },
+    // kilocode_change end
   }
 }

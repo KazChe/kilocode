@@ -1,13 +1,17 @@
 import * as vscode from "vscode"
-import { buildWebviewHtml } from "./utils"
+import { buildWebviewHtml, getWebviewFontSize } from "./utils"
+import { watchFontSizeConfig } from "./kilo-provider/font-size"
 import { appendOutput, getWorkspaceRoot } from "./review-utils"
+import { getDiffMarkdownRender, setDiffMarkdownRender } from "./review-settings"
 
 export interface DiffVirtualFile {
   file: string
-  before: string
-  after: string
+  patch?: string
   additions: number
   deletions: number
+  status?: "added" | "deleted" | "modified"
+  files?: Omit<DiffVirtualFile, "files" | "initialDiffStyle">[]
+  initialDiffStyle: "unified" | "split"
 }
 
 /**
@@ -19,6 +23,7 @@ export class DiffVirtualProvider implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined
   private pending: DiffVirtualFile | undefined
   private outputChannel: vscode.OutputChannel
+  private fontConfigDisposable: vscode.Disposable | undefined
 
   constructor(private readonly extensionUri: vscode.Uri) {
     this.outputChannel = vscode.window.createOutputChannel("Kilo Diff Virtual")
@@ -30,8 +35,9 @@ export class DiffVirtualProvider implements vscode.Disposable {
 
   public open(diff: DiffVirtualFile): void {
     this.pending = diff
+    const count = diff.files?.length ?? 1
     const filename = diff.file.split("/").pop() ?? diff.file
-    const title = `Changes: ${filename}`
+    const title = count > 1 ? `Changes: ${count} files` : `Changes: ${filename}`
 
     if (this.panel) {
       this.panel.title = title
@@ -53,8 +59,12 @@ export class DiffVirtualProvider implements vscode.Disposable {
 
     panel.webview.html = this.getHtml(panel.webview)
     panel.webview.onDidReceiveMessage((msg) => this.onMessage(msg))
+    this.fontConfigDisposable?.dispose()
+    this.fontConfigDisposable = watchFontSizeConfig((msg) => this.post(msg))
     panel.onDidDispose(() => {
       this.log("Panel disposed")
+      this.fontConfigDisposable?.dispose()
+      this.fontConfigDisposable = undefined
       this.panel = undefined
       this.pending = undefined
     })
@@ -70,6 +80,7 @@ export class DiffVirtualProvider implements vscode.Disposable {
         type: "ready",
         vscodeLanguage: vscode.env.language,
         languageOverride: vscode.workspace.getConfiguration("kilo-code.new").get<string>("language"),
+        fontSize: getWebviewFontSize(),
         workspaceDirectory: getWorkspaceRoot(),
       })
       this.pushData()
@@ -78,12 +89,22 @@ export class DiffVirtualProvider implements vscode.Disposable {
 
     if (type === "diffVirtual.close") {
       this.panel?.dispose()
+      return
+    }
+
+    if (type === "diffVirtual.setMarkdownRender" && typeof msg.render === "boolean") {
+      void setDiffMarkdownRender(msg.render)
     }
   }
 
   private pushData(): void {
     if (!this.pending) return
-    this.post({ type: "diffVirtual.data", diff: this.pending })
+    this.post({
+      type: "diffVirtual.data",
+      diff: this.pending,
+      initialDiffStyle: this.pending.initialDiffStyle,
+      markdownRender: getDiffMarkdownRender(),
+    })
   }
 
   private post(message: Record<string, unknown>): void {
@@ -95,12 +116,14 @@ export class DiffVirtualProvider implements vscode.Disposable {
       scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "diff-virtual.js")),
       styleUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "diff-virtual.css")),
       iconsBaseUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "assets", "icons")),
+      workerUri: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "shiki-worker.js")),
       title: "Diff Virtual",
       extraStyles: "#root { display: flex; flex-direction: column; height: 100%; }",
     })
   }
 
   public dispose(): void {
+    this.fontConfigDisposable?.dispose()
     this.panel?.dispose()
     this.outputChannel.dispose()
   }

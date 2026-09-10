@@ -1,6 +1,6 @@
-import { BusEvent } from "@/bus/bus-event"
-import z from "zod"
-import { NamedError } from "@opencode-ai/shared/util/error"
+import { Schema } from "effect"
+import { NamedError } from "@opencode-ai/core/util/error"
+import { IdeEvent } from "@opencode-ai/schema/ide-event"
 
 const SUPPORTED_IDES = [
   { name: "Windsurf" as const, cmd: "windsurf" },
@@ -10,23 +10,13 @@ const SUPPORTED_IDES = [
   { name: "VSCodium" as const, cmd: "codium" },
 ]
 
-export const Event = {
-  Installed: BusEvent.define(
-    "ide.installed",
-    z.object({
-      ide: z.string(),
-    }),
-  ),
-}
+export const Event = IdeEvent
 
-export const AlreadyInstalledError = NamedError.create("AlreadyInstalledError", z.object({}))
+export const AlreadyInstalledError = NamedError.create("AlreadyInstalledError", {})
 
-export const InstallFailedError = NamedError.create(
-  "InstallFailedError",
-  z.object({
-    stderr: z.string(),
-  }),
-)
+export const InstallFailedError = NamedError.create("InstallFailedError", {
+  stderr: Schema.String,
+})
 
 export function ide() {
   if (process.env["TERM_PROGRAM"] === "vscode") {

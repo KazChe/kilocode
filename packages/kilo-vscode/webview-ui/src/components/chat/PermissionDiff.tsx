@@ -1,11 +1,16 @@
-import { type Component, createMemo } from "solid-js"
+import { Show, type Component, createMemo } from "solid-js"
 import { Diff } from "@kilocode/kilo-ui/diff"
 import { DiffChanges } from "@kilocode/kilo-ui/diff-changes"
 import { IconButton } from "@kilocode/kilo-ui/icon-button"
 import { Tooltip } from "@kilocode/kilo-ui/tooltip"
-import { normalize, text } from "@kilocode/kilo-ui/session-diff"
+import { normalize } from "@kilocode/kilo-ui/session-diff"
 import type { PermissionFileDiff } from "../../types/messages"
 import { useVSCode } from "../../context/vscode"
+import { useSession } from "../../context/session"
+import { useWorktreeMode } from "../../context/worktree-mode"
+import { useDiffStyle } from "../../context/diff-style"
+import { dispatchAgentManagerEditPreview } from "../../utils/agent-manager-events"
+import { useLanguage } from "../../context/language"
 
 interface PermissionDiffProps {
   filediff: PermissionFileDiff
@@ -13,6 +18,10 @@ interface PermissionDiffProps {
 
 export const PermissionDiff: Component<PermissionDiffProps> = (props) => {
   const vscode = useVSCode()
+  const session = useSession()
+  const worktree = useWorktreeMode()
+  const diffStyle = useDiffStyle()
+  const { t } = useLanguage()
   const filename = createMemo(() => {
     const parts = props.filediff.file.split("/")
     return parts[parts.length - 1] ?? props.filediff.file
@@ -24,21 +33,25 @@ export const PermissionDiff: Component<PermissionDiffProps> = (props) => {
     return parts.slice(0, -1).join("/")
   })
 
-  const resolved = createMemo(() => {
+  const view = createMemo(() => {
     const fd = props.filediff
-    if (fd.before !== undefined || fd.after !== undefined) return { before: fd.before ?? "", after: fd.after ?? "" }
-    if (fd.patch) {
-      const view = normalize(fd)
-      return { before: text(view, "deletions"), after: text(view, "additions") }
-    }
-    return { before: "", after: "" }
+    if (!fd.patch) return
+    return normalize(fd)
   })
 
   const openInTab = () => {
-    const { before, after } = resolved()
+    if (worktree) {
+      dispatchAgentManagerEditPreview({
+        diff: props.filediff,
+        sessionID: session.currentSessionID(),
+        initialDiffStyle: diffStyle?.style() ?? "unified",
+      })
+      return
+    }
     vscode.postMessage({
       type: "openDiffVirtual",
-      diff: { ...props.filediff, before, after },
+      diff: props.filediff,
+      initialDiffStyle: diffStyle?.style() ?? "unified",
     })
   }
 
@@ -70,17 +83,25 @@ export const PermissionDiff: Component<PermissionDiffProps> = (props) => {
         </div>
         <div data-slot="permission-diff-actions">
           <DiffChanges changes={props.filediff} />
-          <Tooltip value="View in new tab">
-            <IconButton size="small" icon="expand" onClick={openInTab} aria-label="View diff in new tab" />
+          <Tooltip value={worktree ? t("agentManager.editPreview.openInPanel") : "View in new tab"}>
+            <IconButton
+              size="small"
+              icon="expand"
+              onClick={openInTab}
+              aria-label={worktree ? t("agentManager.editPreview.openInPanel") : "View diff in new tab"}
+            />
           </Tooltip>
         </div>
       </div>
       <div data-slot="permission-diff-content">
-        <Diff
-          before={{ name: props.filediff.file, contents: resolved().before }}
-          after={{ name: props.filediff.file, contents: resolved().after }}
-          diffStyle="unified"
-        />
+        <Show
+          when={view()}
+          fallback={<div data-slot="permission-diff-empty">Diff preview unavailable for this file.</div>}
+        >
+          {(v) => (
+            <Diff fileDiff={v().fileDiff} diffStyle="unified" hunkSeparators="simple" disableLineNumbers={false} />
+          )}
+        </Show>
       </div>
     </div>
   )

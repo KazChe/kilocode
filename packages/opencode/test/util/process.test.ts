@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Process } from "../../src/util"
+import { Process } from "@/util/process"
 import { tmpdir } from "../fixture/fixture"
 
 function node(script: string) {
@@ -76,6 +76,25 @@ describe("util.process", () => {
     })
     expect(out.stdout.toString()).toBe("set")
   })
+
+  // kilocode_change start
+  test("can use a complete environment without inherited values", async () => {
+    const key = "KILO_TEST_INHERITED_ENV"
+    const saved = process.env[key]
+    process.env[key] = "secret"
+
+    try {
+      const out = await Process.run(node(`process.stdout.write(process.env.${key} ?? "unset")`), {
+        env: { PATH: process.env.PATH },
+        extendEnv: false,
+      })
+      expect(out.stdout.toString()).toBe("unset")
+    } finally {
+      if (saved === undefined) delete process.env[key]
+      else process.env[key] = saved
+    }
+  })
+  // kilocode_change end
 
   test("uses shell in run on Windows", async () => {
     if (process.platform !== "win32") return

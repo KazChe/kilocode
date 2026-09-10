@@ -5,6 +5,8 @@ description: "Control which commands your KiloClaw agent can run on the host mac
 
 # Exec Approvals
 
+{% partial file="kiloclaw-eol.md" /%}
+
 Exec approvals are the safety interlock that controls which commands your agent can run on the host machine (gateway or node). By default, **all host exec requests are denied** — you must explicitly allowlist the commands you want your agent to run independently. This prevents accidental execution of destructive commands.
 
 {% callout type="warning" %}
@@ -17,11 +19,11 @@ Approvals are enforced locally on the execution host and sit on top of tool poli
 
 ## Security Policies
 
-| Policy      | Behavior                                       |
-| ----------- | ---------------------------------------------- |
-| `deny`      | Block all host exec requests (default)         |
-| `allowlist` | Allow only commands matching the allowlist     |
-| `full`      | Allow everything (equivalent to elevated mode) |
+| Policy | Behavior |
+|---|---|
+| `deny` | Block all host exec requests (default) |
+| `allowlist` | Allow only commands matching the allowlist |
+| `full` | Allow everything (equivalent to elevated mode) |
 
 ## Allow Everything from Settings
 
@@ -37,11 +39,11 @@ Enabling **Allow Everything** removes all exec safety checks. Only use this in t
 
 The `ask` setting controls when the user is prompted for approval:
 
-| Setting   | Behavior                                                |
-| --------- | ------------------------------------------------------- |
-| `off`     | Never prompt                                            |
+| Setting | Behavior |
+|---|---|
+| `off` | Never prompt |
 | `on-miss` | Prompt only when the allowlist does not match (default) |
-| `always`  | Prompt on every command                                 |
+| `always` | Prompt on every command |
 
 If a prompt is required but no UI is reachable, the `askFallback` setting decides the outcome (`deny` by default).
 

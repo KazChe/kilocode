@@ -493,6 +493,14 @@ export class Reply {
     return this
   }
 
+  contentFilter() {
+    this.#finish = "content_filter"
+    this.#hang = false
+    this.#error = undefined
+    this.#reset = false
+    return this
+  }
+
   toolCalls() {
     this.#finish = "tool_calls"
     this.#hang = false
@@ -500,6 +508,16 @@ export class Reply {
     this.#reset = false
     return this
   }
+
+  // kilocode_change start
+  finish(reason: string) {
+    this.#finish = reason
+    this.#hang = false
+    this.#error = undefined
+    this.#reset = false
+    return this
+  }
+  // kilocode_change end
 
   tool(name: string, input: unknown) {
     const id = this.#id()

@@ -7,40 +7,11 @@
  * and version information.
  */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@kilocode/plugin/tui"
-import { createMemo, createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js"
-import { Global } from "@/global"
+import { createMemo, Match, Show, Switch } from "solid-js"
+import { Global } from "@opencode-ai/core/global"
+import { RemoteIndicator } from "@/kilocode/remote-tui"
 
 const id = "internal:kilo-home-footer"
-
-// ---------------------------------------------------------------------------
-// RemoteIndicator – adapted from @/kilocode/remote-tui for plugin API usage
-// ---------------------------------------------------------------------------
-
-function RemoteIndicator(props: { api: TuiPluginApi; kilo: boolean }) {
-  const theme = () => props.api.theme.current
-  const [status, setStatus] = createSignal<{
-    enabled: boolean
-    connected: boolean
-  } | null>(null)
-
-  onMount(() => {
-    const poll = async () => {
-      const res = await props.api.client.remote.status().catch(() => null)
-      if (res?.data) setStatus(res.data)
-    }
-    poll()
-    const timer = setInterval(poll, 5000)
-    onCleanup(() => clearInterval(timer))
-  })
-
-  return (
-    <Show when={props.kilo && status()?.enabled}>
-      <text fg={status()?.connected ? theme().success : theme().warning}>
-        ◆ Remote{status()?.connected ? "" : " …"}
-      </text>
-    </Show>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Sub-components (mirror upstream home/footer with kilo additions)
@@ -102,6 +73,7 @@ function Version(props: { api: TuiPluginApi }) {
 
 function View(props: { api: TuiPluginApi }) {
   const kilo = createMemo(() => props.api.state.provider.some((p) => p.id === "kilo"))
+  const sdk = { client: props.api.client }
 
   return (
     <box
@@ -116,7 +88,12 @@ function View(props: { api: TuiPluginApi }) {
     >
       <Directory api={props.api} />
       <box gap={1} flexDirection="row" flexShrink={0}>
-        <RemoteIndicator api={props.api} kilo={kilo()} />
+        <RemoteIndicator
+          sdk={sdk}
+          theme={props.api.theme.current}
+          kilo={kilo()}
+          event={props.api.event}
+        />
         <Mcp api={props.api} />
       </box>
       <box flexGrow={1} />
@@ -131,7 +108,7 @@ function View(props: { api: TuiPluginApi }) {
 
 const tui: TuiPlugin = async (api) => {
   api.slots.register({
-    order: 101,
+    order: 99,
     slots: {
       home_footer() {
         return <View api={api} />
